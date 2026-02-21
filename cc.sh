@@ -146,7 +146,8 @@ cc-debug() {
 }
 
 cc-budget() {
-  local budget="${1:-2.00}"; shift
+  local budget="${1:-2.00}"
+  [ $# -gt 0 ] && shift
   claude --dangerously-skip-permissions --max-budget-usd "$budget" -p "$*"
 }
 

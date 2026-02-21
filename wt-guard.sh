@@ -18,20 +18,23 @@
 #     }
 #   }
 
-# Fast exit: no worktrees directory means no guard needed
-[ ! -d ".worktrees" ] && exit 0
-
-# Read tool input from stdin
+# Read tool input from stdin (must happen before any exit)
 input="$(cat)"
+
+# Get repo root
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+[ -z "$repo_root" ] && exit 0
+
+# Fast exit: no worktrees directory means no guard needed
+[ ! -d "$repo_root/.worktrees" ] && exit 0
 
 file_path="$(echo "$input" | jq -r '.tool_input.file_path // ""' 2>/dev/null)"
 
 # No file path — can't guard, allow
 [ -z "$file_path" ] && exit 0
 
-# Get repo root
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
-[ -z "$repo_root" ] && exit 0
+# Canonicalize file_path to handle relative paths
+file_path="$(realpath "$file_path" 2>/dev/null || echo "$file_path")"
 
 # If editing inside a worktree, allow (Claude is working correctly)
 if [[ "$file_path" == "$repo_root/.worktrees/"* ]]; then

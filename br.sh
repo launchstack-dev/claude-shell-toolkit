@@ -64,7 +64,7 @@ _br_time_ago() {
   local now created_epoch age_seconds
 
   # Parse ISO date to epoch
-  if date -j &>/dev/null 2>&1; then
+  if date -j -f "%Y-%m-%dT%H:%M:%SZ" "2000-01-01T00:00:00Z" "+%s" &>/dev/null; then
     # macOS
     created_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" "+%s" 2>/dev/null || echo "0")"
   else
@@ -418,9 +418,12 @@ br-pr() {
   _br_check_gh || return 1
 
   local name="$1"
+  local explicit_name=false
 
   # Auto-detect current branch
-  if [ -z "$name" ]; then
+  if [ -n "$name" ]; then
+    explicit_name=true
+  else
     name="$(_br_current_branch)"
     if [ -z "$name" ]; then
       echo "Error: Detached HEAD — specify branch name explicitly." >&2
@@ -490,7 +493,7 @@ br-pr() {
 
   # Create PR — pass through to gh, let user fill in title/body interactively
   # Pass any extra args after name to gh
-  shift 2>/dev/null  # remove name arg if provided
+  [ "$explicit_name" = true ] && shift
   gh pr create --base "$base_branch" "$@"
 }
 

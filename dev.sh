@@ -175,7 +175,7 @@ _dev_find_procs() {
     if [ -n "$pid" ]; then
       local cwd
       cwd=$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | head -1 | sed 's/^n//')
-      echo "$pid $sname $sport ${cwd:--} __main__"
+      echo "$pid	$sname	$sport	${cwd:--}	__main__"
       seen_pids="$seen_pids $pid"
     fi
   done < <(jq -c '.services[]' "$devrc")
@@ -194,7 +194,7 @@ _dev_find_procs() {
         if [ -n "$pid" ] && ! echo " $seen_pids " | grep -qw "$pid"; then
           local cwd
           cwd=$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | head -1 | sed 's/^n//')
-          echo "$pid $key $port ${cwd:--} $wt_name"
+          echo "$pid	$key	$port	${cwd:--}	$wt_name"
           seen_pids="$seen_pids $pid"
         fi
       done < <(jq -r 'keys[]' "$pf")
@@ -221,11 +221,11 @@ _dev_find_procs() {
         if [ ! -d "$wt_check" ]; then
           local port
           port=$(lsof -p "$pid" -i -sTCP:LISTEN -Fn 2>/dev/null | grep -oE ':[0-9]+' | head -1 | tr -d ':')
-          echo "$pid $sname ${port:--} $cwd __orphan__"
+          echo "$pid	$sname	${port:--}	$cwd	__orphan__"
           seen_pids="$seen_pids $pid"
         fi
       fi
-    done < <(pgrep -f "$sname" 2>/dev/null)
+    done < <(pgrep -f "(^|/)$sname(\\s|$)" 2>/dev/null)
   done < <(jq -c '.services[]' "$devrc")
 }
 
@@ -286,7 +286,10 @@ dev() {
   if [ "$is_main" = false ] && [ -f "$worktree_path/.ports.json" ]; then
     ports_json=$(cat "$worktree_path/.ports.json")
   else
-    ports_json=$(_dev_alloc_ports "$devrc" "$wt_name" "$repo_root") || return 1
+    # Lock around port allocation to prevent races between concurrent dev invocations
+    local port_lockdir="$repo_root/.worktrees/.ports.lock"
+    _wt_acquire_lock "$port_lockdir" 5 || return 1
+    ports_json=$(_dev_alloc_ports "$devrc" "$wt_name" "$repo_root") || { _wt_release_lock "$port_lockdir"; return 1; }
     # Write .ports.json sidecar (skip for main repo)
     if [ "$is_main" = false ] && [ -d "$worktree_path" ]; then
       local tmp_ports
@@ -294,6 +297,7 @@ dev() {
       echo "$ports_json" | jq '.' > "$tmp_ports"
       mv "$tmp_ports" "$worktree_path/.ports.json"
     fi
+    _wt_release_lock "$port_lockdir"
   fi
 
   # Set Ghostty tab title
@@ -426,11 +430,7 @@ dev-ps() {
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     local pid sname port cwd source
-    pid=$(echo "$line" | awk '{print $1}')
-    sname=$(echo "$line" | awk '{print $2}')
-    port=$(echo "$line" | awk '{print $3}')
-    cwd=$(echo "$line" | awk '{print $4}')
-    source=$(echo "$line" | awk '{print $5}')
+    IFS=$'\t' read -r pid sname port cwd source <<< "$line"
 
     if [ "$source" = "__main__" ]; then
       main_procs="${main_procs}  PID ${pid}  ${sname}  :${port}  (${cwd})\n"
@@ -458,10 +458,7 @@ dev-ps() {
     while IFS= read -r orphan; do
       [ -z "$orphan" ] && continue
       local opid osname oport ocwd
-      opid=$(echo "$orphan" | awk '{print $1}')
-      osname=$(echo "$orphan" | awk '{print $2}')
-      oport=$(echo "$orphan" | awk '{print $3}')
-      ocwd=$(echo "$orphan" | awk '{print $4}')
+      IFS=$'\t' read -r opid osname oport ocwd <<< "$orphan"
       echo "  PID ${opid}  ${osname}  :${oport}  (cwd: ${ocwd})"
       _wt_prompt "  Kill PID $opid ($osname on :$oport)? [y/N]"
       [[ "$REPLY" =~ ^[Yy]$ ]] && { kill "$opid" 2>/dev/null && echo "  Killed." || echo "  Failed."; }

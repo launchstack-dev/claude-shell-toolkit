@@ -20,10 +20,11 @@ _wt_ensure_git_root() {
   fi
   local toplevel common_dir main_toplevel
   toplevel="$(git rev-parse --show-toplevel)"
-  common_dir="$(git rev-parse --git-common-dir)"
-  common_dir="$(cd "$toplevel" && cd "$(dirname "$common_dir")" && pwd)"
-  main_toplevel="$(git -C "$common_dir" rev-parse --show-toplevel 2>/dev/null || echo "$common_dir")"
-  echo "$main_toplevel"
+  common_dir="$(cd "$toplevel" && cd "$(git rev-parse --git-common-dir)" && pwd)"
+  # common_dir is now the .git dir (absolute). Parent is the main repo root.
+  main_toplevel="$(dirname "$common_dir")"
+  # Verify it's actually a git repo root (handles bare repos gracefully)
+  git -C "$main_toplevel" rev-parse --show-toplevel 2>/dev/null || echo "$toplevel"
 }
 
 _wt_check_jq() {
@@ -104,6 +105,7 @@ _wt_update_main_claude_md() {
   # Build worktree table to a temp file (avoids awk -v escaping issues)
   local table_file
   table_file="$(mktemp)"
+  trap 'rm -f "$table_file"' RETURN
 
   echo "| Branch | Base | Path | Status |" > "$table_file"
   echo "|--------|------|------|--------|" >> "$table_file"
@@ -151,7 +153,7 @@ _wt_update_main_claude_md() {
     }
     !skip { print }
   ' "$claude_md" > "$tmp"
-  mv "$tmp" "$claude_md"
+  mv "$tmp" "$claude_md" || { rm -f "$table_file" "$tmp"; return 1; }
   rm -f "$table_file"
 }
 
@@ -171,7 +173,7 @@ event: file
 conditions:
   - field: file_path
     operator: not_contains
-    pattern: ${worktree_path}
+    pattern: "${worktree_path}"
 action: warn
 ---
 You are editing a file outside your worktree boundary (\`${worktree_path}\`).
@@ -182,18 +184,17 @@ HOOKIFY
 # ─── Lockfile Management ────────────────────────────────────────────────────
 
 _wt_acquire_lock() {
-  local lockfile="$1"
+  local lockdir="$1"
   local max_wait="${2:-10}"
   local waited=0
 
-  while [ -f "$lockfile" ]; do
+  while ! mkdir "$lockdir" 2>/dev/null; do
     local lock_pid
-    lock_pid="$(cat "$lockfile" 2>/dev/null)"
-    # Stale detection: check if holding PID is still alive
+    lock_pid="$(cat "$lockdir/pid" 2>/dev/null)"
     if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
-      echo "Removing stale lockfile (PID $lock_pid no longer running)"
-      rm -f "$lockfile"
-      break
+      echo "Removing stale lock (PID $lock_pid no longer running)"
+      rm -rf "$lockdir"
+      continue
     fi
     if [ "$waited" -ge "$max_wait" ]; then
       echo "Error: Could not acquire merge lock after ${max_wait}s (held by PID $lock_pid)" >&2
@@ -203,12 +204,11 @@ _wt_acquire_lock() {
     waited=$((waited + 1))
   done
 
-  echo $$ > "$lockfile"
+  echo $$ > "$lockdir/pid"
 }
 
 _wt_release_lock() {
-  local lockfile="$1"
-  rm -f "$lockfile"
+  rm -rf "$1"
 }
 
 # ─── Project Setup ───────────────────────────────────────────────────────────
@@ -477,12 +477,9 @@ wt-merge() {
   main_repo="$(jq -r '.main_repo' "$meta")"
   name="${name:-$branch}"
 
-  # Acquire merge lock (PID-based with stale detection)
+  # Acquire merge lock (atomic mkdir-based with stale detection)
   local lockfile="$main_repo/.worktrees/.merge.lock"
   _wt_acquire_lock "$lockfile" 10 || return 1
-
-  # Ensure lock is released on function return
-  trap '_wt_release_lock "'"$lockfile"'"' RETURN
 
   echo "Merging worktree '$name' (branch: $branch) into '$base_branch'"
   echo ""
@@ -495,6 +492,7 @@ wt-merge() {
     _wt_prompt "Continue? Uncommitted changes will NOT be merged. [y/N]"
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
       echo "Aborted."
+      _wt_release_lock "$lockfile"
       return 1
     fi
   fi
@@ -509,6 +507,7 @@ wt-merge() {
     _wt_prompt "Continue with cleanup anyway? [y/N]"
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
       echo "Aborted."
+      _wt_release_lock "$lockfile"
       return 0
     fi
   else
@@ -521,17 +520,19 @@ wt-merge() {
   _wt_prompt "Proceed with merge into '$base_branch'? [y/N]"
   if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
     echo "Aborted."
+    _wt_release_lock "$lockfile"
     return 0
   fi
 
   # If we're inside the worktree being removed, move out
-  if [[ "$(pwd)" == "$worktree_path"* ]]; then
+  if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
     cd "$main_repo" || return 1
   fi
 
   # Checkout base branch in main repo (explicit target from metadata)
   git -C "$main_repo" checkout "$base_branch" || {
     echo "Error: Could not checkout '$base_branch' in main repo." >&2
+    _wt_release_lock "$lockfile"
     return 1
   }
 
@@ -543,6 +544,7 @@ wt-merge() {
     echo ""
     echo "Error: Merge failed. Resolve conflicts in $main_repo, then run:" >&2
     echo "  wt-cleanup $name" >&2
+    _wt_release_lock "$lockfile"
     return 1
   fi
 
@@ -568,6 +570,8 @@ wt-merge() {
     _wt_update_main_claude_md "$main_repo"
   fi
 
+  _wt_release_lock "$lockfile"
+
   echo ""
   echo "Done. Branch '$base_branch' in $main_repo"
 }
@@ -578,7 +582,7 @@ wt-cleanup() {
   if [ -z "$name" ]; then
     # Auto-detect from current directory
     if [ -f ".worktree.json" ]; then
-      name="$(jq -r '.branch' .worktree.json 2>/dev/null)"
+      name="$(jq -r '.branch' "$PWD/.worktree.json" 2>/dev/null)"
     fi
     if [ -z "$name" ]; then
       echo "Usage: wt-cleanup <name>" >&2
@@ -623,7 +627,7 @@ wt-cleanup() {
   fi
 
   # If we're inside the worktree being removed, move out
-  if [[ "$(pwd)" == "$worktree_path"* ]]; then
+  if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
     cd "$repo_root" || true
   fi
 
