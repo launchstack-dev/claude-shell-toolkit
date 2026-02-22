@@ -3,7 +3,7 @@
 # Source from ~/.zshrc. Provides: cc, ccc, ccr, ccf, cc-yolo, cc-edit,
 # cc-plan, cc-read, cc-opus, cc-sonnet, cc-haiku, cc-q, cc-pipe,
 # cc-review, cc-review-branch, cc-explain, cc-msg, cc-deep, cc-fast,
-# cc-debug, cc-budget, cc-sandbox, cc-nobash, cc-nonet, cc-jail,
+# cc-debug, cc-budget, cc-vm, cc-nobash, cc-nonet, cc-jail,
 # cc-mono, cc-wt, cc-pr, cc-help
 #
 # Note: `cc` shadows the system C compiler (cc -> clang on macOS).
@@ -13,7 +13,7 @@
 # ─── Core Session ────────────────────────────────────────────────────────────
 
 cc() {
-  claude "$@"
+  claude --chrome "$@"
 }
 
 ccc() {
@@ -153,10 +153,15 @@ cc-budget() {
 
 # ─── Sandbox Modes ───────────────────────────────────────────────────────────
 
-cc-sandbox() {
+cc-vm() {
   # Full autonomy inside a real sandbox (Docker/VM). No permission prompts.
   # Intended for environments where the container IS the safety boundary.
   claude --dangerously-skip-permissions --model "${CC_SANDBOX_MODEL:-sonnet}" "$@"
+}
+
+cc-sandbox() {
+  echo "Note: cc-sandbox is now cc-vm (Docker/VM use)." >&2
+  cc-vm "$@"
 }
 
 cc-nobash() {
@@ -232,7 +237,7 @@ Claude Code Shell Shortcuts
 ============================
 
 Core Session:
-  cc [args]                 claude (passthrough, shadows system cc compiler)
+  cc [args]                 claude --chrome (passthrough, shadows system cc compiler)
   ccc [args]                Continue last conversation in this directory
   ccr [search]              Resume a conversation (interactive picker)
   ccf [args]                Fork from last conversation (new session ID)
@@ -265,7 +270,7 @@ Compound Modes:
                               e.g. cc-budget 5.00 "refactor auth module"
 
 Sandbox Modes:                    (least restricted → most restricted)
-  cc-sandbox [args]         Full autonomy, for use inside Docker/VM
+  cc-vm [args]              Full autonomy, for use inside Docker/VM
                               Set CC_SANDBOX_MODEL=opus to override model
   cc-nobash [args]          Can read + edit files, but no shell execution
   cc-nonet [args]           No WebSearch or WebFetch — air-gapped from web
@@ -281,10 +286,12 @@ Integrations:
   cc-pr [number|url]        Resume or start from a GitHub PR
 
 Composability:
-  Model and permission functions pass through all args, so you can combine:
+  All functions pass through args to claude, so you can combine:
     cc-opus --continue                     Opus + continue
     cc-yolo --model opus                   Yolo + opus
     cc-edit --continue --model haiku       Accept edits + continue + haiku
+
+  Note: only cc() includes --chrome. Other shortcuts call claude directly.
 
   cc-help                   Show this help message
 HELP

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # wt.sh — Git Worktree Management for Claude Code
-# Source from ~/.zshrc. Provides: wt, wt-list, wt-merge, wt-cleanup, wtc
+# Source from ~/.zshrc. Provides: wt (list, merge, cleanup, cd, help)
+# Legacy aliases: wt-list, wt-merge, wt-cleanup, wtc, wt-help
 #
 # Requires: jq, git
 
@@ -255,7 +256,7 @@ _wt_run_project_setup() {
 
 # ─── Main Functions ──────────────────────────────────────────────────────────
 
-wt() {
+_wt_create() {
   local name="$1"
   local base="${2:-HEAD}"
 
@@ -263,11 +264,12 @@ wt() {
     echo "Usage: wt <name> [base-branch]"
     echo "  Creates a git worktree in .worktrees/<name>"
     echo ""
-    echo "Related commands:"
-    echo "  wt-list              List worktrees with status"
-    echo "  wt-merge [name]      Merge worktree into base branch"
-    echo "  wt-cleanup <name>    Remove a worktree"
-    echo "  wtc <name>           cd into an existing worktree"
+    echo "Subcommands:"
+    echo "  wt list              List worktrees with status"
+    echo "  wt merge [name]      Merge worktree into base branch"
+    echo "  wt cleanup <name>    Remove a worktree"
+    echo "  wt cd <name>         cd into an existing worktree"
+    echo "  wt help              Show full help"
     return 1
   fi
 
@@ -383,7 +385,7 @@ wt() {
   echo "Branch: $(git branch --show-current)"
 }
 
-wt-list() {
+_wt_list() {
   local repo_root
   repo_root="$(_wt_ensure_git_root)" || return 1
 
@@ -447,7 +449,7 @@ wt-list() {
   echo ""
 }
 
-wt-merge() {
+_wt_merge() {
   _wt_check_jq || return 1
 
   local name="$1"
@@ -467,7 +469,7 @@ wt-merge() {
 
   if [ ! -f "$meta" ]; then
     echo "Error: Not in a managed worktree (no .worktree.json found)." >&2
-    echo "Usage: wt-merge [name]  (run from worktree or pass name)" >&2
+    echo "Usage: wt merge [name]  (run from worktree or pass name)" >&2
     return 1
   fi
 
@@ -543,7 +545,7 @@ wt-merge() {
   else
     echo ""
     echo "Error: Merge failed. Resolve conflicts in $main_repo, then run:" >&2
-    echo "  wt-cleanup $name" >&2
+    echo "  wt cleanup $name" >&2
     _wt_release_lock "$lockfile"
     return 1
   fi
@@ -576,7 +578,7 @@ wt-merge() {
   echo "Done. Branch '$base_branch' in $main_repo"
 }
 
-wt-cleanup() {
+_wt_cleanup() {
   local name="$1"
 
   if [ -z "$name" ]; then
@@ -585,7 +587,7 @@ wt-cleanup() {
       name="$(jq -r '.branch' "$PWD/.worktree.json" 2>/dev/null)"
     fi
     if [ -z "$name" ]; then
-      echo "Usage: wt-cleanup <name>" >&2
+      echo "Usage: wt cleanup <name>" >&2
       return 1
     fi
   fi
@@ -651,11 +653,11 @@ wt-cleanup() {
   _wt_update_main_claude_md "$repo_root"
 }
 
-wtc() {
+_wtc() {
   local name="$1"
 
   if [ -z "$name" ]; then
-    echo "Usage: wtc <name>" >&2
+    echo "Usage: wt cd <name>" >&2
     echo "  cd into an existing worktree" >&2
     return 1
   fi
@@ -677,27 +679,27 @@ wtc() {
   echo "Branch: $(git branch --show-current)"
 }
 
-wt-help() {
+_wt_help() {
   cat <<'HELP'
 Git Worktree Management for Claude Code
 ========================================
 
-Commands:
+Usage:
   wt <name> [base]       Create worktree in .worktrees/<name>, cd into it
                           base defaults to current branch (HEAD)
+  wt -- <name>            Force create (bypass subcommand matching)
 
-  wt-list                List all worktrees with status + stale detection
-
-  wt-merge [name]        Merge worktree into its base branch
+Subcommands:
+  wt list                List all worktrees with status + stale detection
+  wt merge [name]        Merge worktree into its base branch
                           Auto-detects from current dir if no name given
                           Includes pre-merge diff, lockfile for parallel safety
-
-  wt-cleanup <name>      Remove a worktree (prompts for confirmation)
+  wt cleanup <name>      Remove a worktree (prompts for confirmation)
                           Auto-detects from current dir if no name given
+  wt cd <name>           cd into an existing worktree
+  wt help                Show this help message
 
-  wtc <name>             cd into an existing worktree
-
-  wt-help                Show this help message
+Aliases: wt list = wt ls, wt cleanup = wt rm
 
 What wt creates:
   .worktrees/<name>/              The worktree directory
@@ -721,3 +723,25 @@ Optional main repo guard:
 Requirements: git, jq
 HELP
 }
+
+# ─── Dispatcher ──────────────────────────────────────────────────────────────
+
+wt() {
+  if [ "$1" = "--" ]; then shift; _wt_create "$@"; return $?; fi
+  case "$1" in
+    list|ls)        shift; _wt_list "$@" ;;
+    merge)          shift; _wt_merge "$@" ;;
+    cleanup|rm)     shift; _wt_cleanup "$@" ;;
+    cd)             shift; _wtc "$@" ;;
+    help|-h|--help) _wt_help ;;
+    *)              _wt_create "$@" ;;
+  esac
+}
+
+# ─── Backward-Compat Wrappers ───────────────────────────────────────────────
+
+wt-list()    { wt list "$@"; }
+wt-merge()   { wt merge "$@"; }
+wt-cleanup() { wt cleanup "$@"; }
+wtc()        { wt cd "$@"; }
+wt-help()    { wt help; }

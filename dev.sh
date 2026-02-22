@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # dev.sh — Dev Workspace Launcher for Claude Code
 # Layers dev server management on top of wt.sh (does not modify wt.sh)
-# Source from ~/.zshrc (after wt.sh). Provides: dev, dev-init, dev-ps, dev-stop, dev-help
+# Source from ~/.zshrc (after wt.sh). Provides: dev (init, ps, stop, help)
+# Legacy aliases: dev-init, dev-ps, dev-stop, dev-help
 #
 # Requires: jq, wt.sh sourced first
 
@@ -231,7 +232,7 @@ _dev_find_procs() {
 
 # ─── Public Commands ─────────────────────────────────────────────────────────
 
-dev() {
+_dev_enter() {
   local name="$1" base="$2"
   _wt_check_jq || return 1
 
@@ -239,7 +240,7 @@ dev() {
   local devrc
   devrc=$(_dev_find_devrc)
   if [ $? -ne 0 ]; then
-    echo "No .devrc.json found. Run dev-init to set up."
+    echo "No .devrc.json found. Run dev init to set up."
     return 1
   fi
 
@@ -260,7 +261,7 @@ dev() {
       # Create new worktree via wt (wt requires main repo cwd)
       local saved_dir="$PWD"
       cd "$repo_root" || return 1
-      wt "$name" ${base:+"$base"} || { cd "$saved_dir" 2>/dev/null; return 1; }
+      _wt_create "$name" ${base:+"$base"} || { cd "$saved_dir" 2>/dev/null; return 1; }
       # wt already cd'd into the new worktree
       worktree_path="$repo_root/.worktrees/$name"
       wt_name="$name"
@@ -321,7 +322,7 @@ dev() {
   _dev_print_workspace "$worktree_path" "$ports_json" "$devrc" "$is_main"
 }
 
-dev-init() {
+_dev_init() {
   _wt_check_jq || return 1
 
   local repo_root
@@ -409,13 +410,13 @@ TEMPLATE
   echo "Wrote $repo_root/.devrc.json"
 }
 
-dev-ps() {
+_dev_ps() {
   _wt_check_jq || return 1
 
   local devrc
   devrc=$(_dev_find_devrc)
   if [ $? -ne 0 ]; then
-    echo "No .devrc.json found. Run dev-init to set up."
+    echo "No .devrc.json found. Run dev init to set up."
     return 1
   fi
 
@@ -471,7 +472,7 @@ dev-ps() {
   fi
 }
 
-dev-stop() {
+_dev_stop() {
   _wt_check_jq || return 1
 
   local name="$1"
@@ -535,23 +536,22 @@ dev-stop() {
   [ "$found" = false ] && echo "No dev server processes found for $target_path."
 }
 
-dev-help() {
+_dev_help() {
   cat <<'HELP'
 Dev Workspace Launcher for Claude Code
 =======================================
 
-Commands:
+Usage:
   dev [name] [base]      Create/enter worktree + show workspace setup with ports
                           No args in main repo → default ports
                           No args in worktree → worktree ports
+  dev -- <name>           Force enter (bypass subcommand matching)
 
-  dev-init               Scaffold .devrc.json (auto-detects vite, convex, next)
-
-  dev-ps                 Show running dev servers, flag orphans, prompt to kill
-
-  dev-stop [name]        Kill dev servers for a worktree (auto-detects from cwd)
-
-  dev-help               Show this help
+Subcommands:
+  dev init               Scaffold .devrc.json (auto-detects vite, convex, next)
+  dev ps                 Show running dev servers, flag orphans, prompt to kill
+  dev stop [name]        Kill dev servers for a worktree (auto-detects from cwd)
+  dev help               Show this help
 
 Port allocation:
   Main repo always gets default ports from .devrc.json
@@ -575,3 +575,23 @@ Port file: .ports.json (in each worktree, separate from .worktree.json)
 Requirements: jq, wt.sh (sourced before dev.sh)
 HELP
 }
+
+# ─── Dispatcher ──────────────────────────────────────────────────────────────
+
+dev() {
+  if [ "$1" = "--" ]; then shift; _dev_enter "$@"; return $?; fi
+  case "$1" in
+    init)           shift; _dev_init "$@" ;;
+    ps)             shift; _dev_ps "$@" ;;
+    stop)           shift; _dev_stop "$@" ;;
+    help|-h|--help) _dev_help ;;
+    *)              _dev_enter "$@" ;;
+  esac
+}
+
+# ─── Backward-Compat Wrappers ───────────────────────────────────────────────
+
+dev-init() { dev init "$@"; }
+dev-ps()   { dev ps "$@"; }
+dev-stop() { dev stop "$@"; }
+dev-help() { dev help; }
