@@ -9,7 +9,8 @@ Shell scripts for running parallel [Claude Code](https://docs.anthropic.com/en/d
 | [`wt.sh`](#wtsh--git-worktrees) | Git worktree management with Claude isolation boundaries |
 | [`dev.sh`](#devsh--dev-workspace-launcher) | Dev server port allocation per worktree (Vite, Convex, Next.js) |
 | [`br.sh`](#brsh--branch-management) | Lightweight branch management with base tracking |
-| [`cc.sh`](#ccsh--claude-code-shortcuts) | 25+ shell shortcuts for Claude Code sessions |
+| [`cc.sh`](#ccsh--claude-code-shortcuts) | 30+ shell shortcuts for Claude Code sessions |
+| [`claude-sandbox.sb`](#kernel-sandbox) | macOS Seatbelt profile for kernel-enforced filesystem sandbox |
 | [`wt-guard.sh`](#wt-guardsh--main-repo-guard) | PreToolUse hook — prompts when Claude edits source files in main repo |
 
 ## Install
@@ -29,10 +30,10 @@ EOF
 source ~/.zshrc
 
 # Verify
-wt-help && dev-help && br-help && cc-help
+wt help && dev help && br help && cc-help
 ```
 
-**Requires:** `git`, `jq` (`brew install jq`), `gh` (for `br-pr` commands)
+**Requires:** `git`, `jq` (`brew install jq`), `gh` (for `br pr` commands)
 
 ---
 
@@ -45,11 +46,12 @@ Creates isolated git worktrees with Claude-aware boundaries so parallel Claude i
 | Command | Purpose |
 |---------|---------|
 | `wt <name> [base]` | Create worktree, inject Claude context, cd into it |
-| `wt-list` | List worktrees with status + stale detection |
-| `wt-merge [name]` | Merge into base branch with pre-merge diff + lockfile |
-| `wt-cleanup <name>` | Remove worktree, update CLAUDE.md map |
-| `wtc <name>` | Quick cd into existing worktree |
-| `wt-help` | Show all commands |
+| `wt list` | List worktrees with status + stale detection |
+| `wt merge [name]` | Merge into base branch with pre-merge diff + lockfile |
+| `wt cleanup <name>` | Remove worktree, update CLAUDE.md map |
+| `wt cd <name>` | Quick cd into existing worktree |
+| `wt help` | Show all commands |
+| `wt -- <name>` | Force create (bypass subcommand matching) |
 
 ### What `wt` Creates
 
@@ -85,10 +87,11 @@ Layers dev server management on top of `wt.sh`. Allocates deterministic ports pe
 | Command | Purpose |
 |---------|---------|
 | `dev [name] [base]` | Create/enter worktree + show workspace setup with ports |
-| `dev-init` | Scaffold `.devrc.json` (auto-detects vite, convex, next.js) |
-| `dev-ps` | Show running dev servers, flag orphans, prompt to kill |
-| `dev-stop [name]` | Kill dev servers for a worktree |
-| `dev-help` | Show all commands |
+| `dev init` | Scaffold `.devrc.json` (auto-detects vite, convex, next.js) |
+| `dev ps` | Show running dev servers, flag orphans, prompt to kill |
+| `dev stop [name]` | Kill dev servers for a worktree |
+| `dev help` | Show all commands |
+| `dev -- <name>` | Force enter (bypass subcommand matching) |
 
 ### `.devrc.json`
 
@@ -117,7 +120,7 @@ Lives in the project root. Defines what dev servers the project uses:
 - `port` — default/base port (main repo gets this exact port, worktrees get base + offset)
 - `main_only` — service only runs in main repo, skipped in worktrees (e.g., Convex which shares a single cloud backend)
 
-Run `dev-init` in a project to auto-detect and generate this file.
+Run `dev init` in a project to auto-detect and generate this file.
 
 ### Port Allocation
 
@@ -158,21 +161,22 @@ Lightweight branch management that tracks "what branch did I branch from?" so yo
 | Command | Purpose |
 |---------|---------|
 | `br <name> [base]` | Create branch and track its base |
-| `br-done [name]` | Merge branch back into its base (local) |
-| `br-pr [name]` | Push and create PR targeting base via `gh` |
-| `br-pr-done [name]` | Clean up after PR is merged (local + remote branch, metadata) |
-| `br-list` | List tracked branches with status (active/merged/deleted) |
-| `br-cleanup [name]` | Delete branch and metadata without merging |
-| `br-help` | Show all commands |
+| `br done [name]` | Merge branch back into its base (local) |
+| `br pr [name]` | Push and create PR targeting base via `gh` |
+| `br pr-done [name]` | Clean up after PR is merged (local + remote branch, metadata) |
+| `br list` | List tracked branches with status (active/merged/deleted) |
+| `br cleanup [name]` | Delete branch and metadata without merging |
+| `br help` | Show all commands |
+| `br -- <name>` | Force create (bypass subcommand matching) |
 
 ### Usage
 
 ```bash
 br auth-feature           # branch from current, track base
 # ... do work ...
-br-pr                     # push + gh pr create targeting base
+br pr                     # push + gh pr create targeting base
 # ... PR merged on GitHub ...
-br-pr-done                # checkout base, pull, delete local+remote branch
+br pr-done                # checkout base, pull, delete local+remote branch
 ```
 
 All commands auto-detect the current branch when no name is given.
@@ -181,7 +185,7 @@ All commands auto-detect the current branch when no name is given.
 
 ## `cc.sh` — Claude Code Shortcuts
 
-25+ shell shortcuts that wrap `claude` with common flag combinations. Shadows the system `cc` compiler — use `clang` or `gcc` directly if needed.
+30+ shell shortcuts that wrap `claude` with common flag combinations. Shadows the system `cc` compiler — use `clang` or `gcc` directly if needed.
 
 ### Commands
 
@@ -189,7 +193,7 @@ All commands auto-detect the current branch when no name is given.
 
 | Command | Purpose |
 |---------|---------|
-| `cc [args]` | `claude` (passthrough) |
+| `cc [args]` | `claude --chrome` (passthrough) |
 | `ccc [args]` | Continue last conversation |
 | `ccr [search]` | Resume a conversation |
 | `ccf [args]` | Fork from last conversation |
@@ -231,11 +235,20 @@ All commands auto-detect the current branch when no name is given.
 | `cc-debug` | Debug + verbose + continue |
 | `cc-budget <$> <prompt>` | Budget-capped one-shot (default $2) |
 
+**Kernel Sandbox** (macOS Seatbelt — kernel-enforced filesystem restrictions):
+
+| Command | Purpose |
+|---------|---------|
+| `cc-sbox` | Yolo inside kernel sandbox — writes scoped to project dir |
+| `cc-sbox-edit` | acceptEdits inside kernel sandbox |
+| `cc-sbox-deep` | Opus + yolo + continue inside kernel sandbox |
+| `cc-sbox-test` | Verify sandbox boundaries (writes in/out of boundary) |
+
 **Sandbox Modes** (least → most restricted):
 
 | Command | Purpose |
 |---------|---------|
-| `cc-sandbox` | Full autonomy, for Docker/VM |
+| `cc-vm` | Full autonomy, for Docker/VM (formerly `cc-sandbox`) |
 | `cc-nobash` | Read + edit, no shell |
 | `cc-nonet` | No web access |
 | `cc-jail` | Read-only, no bash, no network |
@@ -253,6 +266,71 @@ All model and permission functions pass through args, so you can combine:
 cc-opus --continue
 cc-yolo --model opus
 cc-edit --continue --model haiku
+```
+
+---
+
+## Kernel Sandbox
+
+macOS `sandbox-exec` (Seatbelt) provides kernel-enforced filesystem restrictions with zero overhead — no VM, no container. Claude gets full autonomy within the project directory, with writes blocked everywhere else by the kernel.
+
+### How It Works
+
+The `claude-sandbox.sb` Seatbelt profile uses a deny-default policy with three parameterized write zones:
+
+| Zone | Path | Purpose |
+|------|------|---------|
+| `PROJECT_DIR` | Project/worktree root | The only writable zone for code |
+| `CLAUDE_HOME` | `~/.claude` | Session state, config, memory |
+| `TMPDIR_REAL` | Resolved `$TMPDIR` | Node.js temp files |
+
+All reads are allowed — the threat model is preventing writes, not reads. SSH keys are readable (git push works) but not writable.
+
+### Commands
+
+```bash
+cc-sbox                    # Yolo inside kernel sandbox
+cc-sbox-edit               # acceptEdits inside kernel sandbox
+cc-sbox-deep               # Opus + yolo + continue inside kernel sandbox
+cc-sbox-test               # Verify sandbox boundaries
+```
+
+Extra args pass through to `claude`:
+```bash
+cc-sbox --model opus       # Model override
+cc-sbox --continue         # Continue session
+cc-sbox -p "fix all bugs"  # One-shot
+```
+
+### Project Directory Detection
+
+| Context | Sandbox boundary |
+|---------|-----------------|
+| Inside a managed worktree | Worktree path (e.g., `.worktrees/my-feature/`) |
+| In a git repo (no worktree) | Repo root |
+| Not in a git repo | `$PWD` |
+| `CC_SANDBOX_DIR` set | That path (manual override) |
+
+When used inside a worktree created by `wt.sh`, the sandbox auto-scopes to the worktree path — combining git isolation with OS-level isolation.
+
+### Limitations
+
+- **macOS only** — requires `sandbox-exec` (Seatbelt)
+- **npm/bun cache not writable** — install dependencies before entering sandbox mode
+- **`npm install` uses local `node_modules/`** which IS in the project dir and works fine
+- **Not a security boundary against a determined attacker** — Seatbelt has known bypasses. This prevents accidental writes, not adversarial escape.
+
+### Verification
+
+```bash
+# Run boundary test in a project dir
+cc-sbox-test
+
+# Run from inside a worktree — confirms boundary is worktree, not repo root
+cd .worktrees/my-feature && cc-sbox-test
+
+# Manual escape test: from within Claude, try:
+#   touch ~/test-escape    → should get EPERM
 ```
 
 ---
@@ -320,15 +398,15 @@ pwd && git branch --show-current && git worktree list
 5. If unsure which worktree you are in, ask.
 ```
 
-The table between the markers is auto-regenerated by `wt` and `wt-cleanup`.
+The table between the markers is auto-regenerated by `wt` and `wt cleanup`.
 
 ### Dev Servers
 
-Run `dev-init` in projects that use dev servers:
+Run `dev init` in projects that use dev servers:
 
 ```bash
 cd my-project
-dev-init        # auto-detects vite, convex, next.js
+dev init        # auto-detects vite, convex, next.js
 ```
 
 ---
@@ -354,16 +432,16 @@ claude
 dev billing-ui
 
 # Check what's running across all worktrees
-dev-ps
+dev ps
 
 # When done, merge and clean up
-wt-merge auth-feature
+wt merge auth-feature
 
 # Or use branch management for lighter-weight work
 br quick-fix
 # ... work ...
-br-pr              # push + create PR targeting base
-br-pr-done         # clean up after merge
+br pr              # push + create PR targeting base
+br pr-done         # clean up after merge
 ```
 
 ## Compatibility
@@ -371,7 +449,7 @@ br-pr-done         # clean up after merge
 - Shell: bash and zsh
 - Terminal: Ghostty (tab renaming, split keybindings in instructions)
 - Works with the [superpowers `using-git-worktrees` skill](https://github.com/anthropics/claude-code-plugins)
-- Worktrees created by other tools show in `wt-list` via `git worktree list`
+- Worktrees created by other tools show in `wt list` via `git worktree list`
 
 ## License
 

@@ -3,7 +3,8 @@
 # Source from ~/.zshrc. Provides: cc, ccc, ccr, ccf, cc-yolo, cc-edit,
 # cc-plan, cc-read, cc-opus, cc-sonnet, cc-haiku, cc-q, cc-pipe,
 # cc-review, cc-review-branch, cc-explain, cc-msg, cc-deep, cc-fast,
-# cc-debug, cc-budget, cc-sandbox, cc-nobash, cc-nonet, cc-jail,
+# cc-debug, cc-budget, cc-vm, cc-nobash, cc-nonet, cc-jail,
+# cc-sbox, cc-sbox-edit, cc-sbox-deep, cc-sbox-test,
 # cc-mono, cc-wt, cc-pr, cc-help
 #
 # Note: `cc` shadows the system C compiler (cc -> clang on macOS).
@@ -13,7 +14,7 @@
 # ─── Core Session ────────────────────────────────────────────────────────────
 
 cc() {
-  claude "$@"
+  claude --chrome "$@"
 }
 
 ccc() {
@@ -153,10 +154,16 @@ cc-budget() {
 
 # ─── Sandbox Modes ───────────────────────────────────────────────────────────
 
-cc-sandbox() {
+cc-vm() {
   # Full autonomy inside a real sandbox (Docker/VM). No permission prompts.
   # Intended for environments where the container IS the safety boundary.
   claude --dangerously-skip-permissions --model "${CC_SANDBOX_MODEL:-sonnet}" "$@"
+}
+
+cc-sandbox() {
+  # Deprecated: renamed to cc-vm. Use cc-sbox for kernel sandbox.
+  echo "Note: cc-sandbox is now cc-vm (Docker/VM use). For kernel sandbox, use cc-sbox." >&2
+  cc-vm "$@"
 }
 
 cc-nobash() {
@@ -175,6 +182,199 @@ cc-jail() {
   # Maximum restriction: read-only, no bash, no network.
   # Claude can only look at code and answer questions.
   claude --allowed-tools "Read Glob Grep LS" "$@"
+}
+
+# ─── Kernel Sandbox (macOS Seatbelt) ─────────────────────────────────────────
+
+_cc_sandbox_profile() {
+  echo "${HOME}/.claude/scripts/claude-sandbox.sb"
+}
+
+_cc_resolve_project_dir() {
+  # Priority: CC_SANDBOX_DIR env var > worktree > git root > PWD
+  if [ -n "${CC_SANDBOX_DIR:-}" ]; then
+    (cd "$CC_SANDBOX_DIR" && pwd)
+    return
+  fi
+
+  # Walk up looking for .worktree.json (wt.sh managed worktree)
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -f "$dir/.worktree.json" ]; then
+      echo "$dir"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+
+  # Fall back to git root
+  local git_root
+  git_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+  if [ -n "$git_root" ]; then
+    echo "$git_root"
+    return
+  fi
+
+  # Last resort: current directory
+  echo "$PWD"
+}
+
+_cc_sandbox_exec() {
+  local profile project_dir claude_home tmpdir_real
+  profile="$(_cc_sandbox_profile)"
+
+  if [ ! -f "$profile" ]; then
+    echo "Error: Seatbelt profile not found at $profile" >&2
+    return 1
+  fi
+
+  if ! command -v sandbox-exec &>/dev/null; then
+    echo "Error: sandbox-exec not found. Kernel sandbox requires macOS." >&2
+    return 1
+  fi
+
+  project_dir="$(_cc_resolve_project_dir)"
+  claude_home="${HOME}/.claude"
+  tmpdir_real="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+
+  echo "┌─────────────────────────────────────────────────────────"
+  echo "│ Kernel Sandbox Active"
+  echo "│ Writes allowed:  $project_dir"
+  echo "│                  $claude_home"
+  echo "│                  $tmpdir_real"
+  echo "│ Writes blocked:  everywhere else (kernel-enforced)"
+  echo "└─────────────────────────────────────────────────────────"
+
+  sandbox-exec -f "$profile" \
+    -D "PROJECT_DIR=$project_dir" \
+    -D "CLAUDE_HOME=$claude_home" \
+    -D "TMPDIR_REAL=$tmpdir_real" \
+    claude "$@"
+}
+
+cc-sbox() {
+  # Yolo mode inside kernel sandbox — full autonomy within project boundary
+  _cc_sandbox_exec --dangerously-skip-permissions "$@"
+}
+
+cc-sbox-edit() {
+  # acceptEdits mode inside kernel sandbox
+  _cc_sandbox_exec --permission-mode acceptEdits "$@"
+}
+
+cc-sbox-deep() {
+  # Opus + yolo + continue inside kernel sandbox
+  _cc_sandbox_exec --dangerously-skip-permissions --model opus --continue "$@"
+}
+
+cc-sbox-test() {
+  # Verify sandbox boundaries — attempts writes in/out of boundary
+  local project_dir claude_home tmpdir_real profile
+  profile="$(_cc_sandbox_profile)"
+
+  if [ ! -f "$profile" ]; then
+    echo "Error: Seatbelt profile not found at $profile" >&2
+    return 1
+  fi
+
+  if ! command -v sandbox-exec &>/dev/null; then
+    echo "Error: sandbox-exec not found. Kernel sandbox requires macOS." >&2
+    return 1
+  fi
+
+  project_dir="$(_cc_resolve_project_dir)"
+  claude_home="${HOME}/.claude"
+  tmpdir_real="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+
+  echo "Testing kernel sandbox boundaries..."
+  echo "  Project dir: $project_dir"
+  echo "  Claude home: $claude_home"
+  echo "  Temp dir:    $tmpdir_real"
+  echo ""
+
+  local pass=0 fail=0
+  local test_file
+
+  # Test 1: Write inside project dir (should succeed)
+  test_file="$project_dir/.sandbox-test-$$"
+  if sandbox-exec -f "$profile" \
+    -D "PROJECT_DIR=$project_dir" \
+    -D "CLAUDE_HOME=$claude_home" \
+    -D "TMPDIR_REAL=$tmpdir_real" \
+    bash -c "echo test > '$test_file'" 2>/dev/null; then
+    echo "  PASS  Write inside project dir"
+    rm -f "$test_file"
+    ((pass++))
+  else
+    echo "  FAIL  Write inside project dir (should have succeeded)"
+    ((fail++))
+  fi
+
+  # Test 2: Write inside ~/.claude (should succeed)
+  test_file="$claude_home/.sandbox-test-$$"
+  if sandbox-exec -f "$profile" \
+    -D "PROJECT_DIR=$project_dir" \
+    -D "CLAUDE_HOME=$claude_home" \
+    -D "TMPDIR_REAL=$tmpdir_real" \
+    bash -c "echo test > '$test_file'" 2>/dev/null; then
+    echo "  PASS  Write inside ~/.claude"
+    rm -f "$test_file"
+    ((pass++))
+  else
+    echo "  FAIL  Write inside ~/.claude (should have succeeded)"
+    ((fail++))
+  fi
+
+  # Test 3: Write inside TMPDIR (should succeed)
+  test_file="$tmpdir_real/sandbox-test-$$"
+  if sandbox-exec -f "$profile" \
+    -D "PROJECT_DIR=$project_dir" \
+    -D "CLAUDE_HOME=$claude_home" \
+    -D "TMPDIR_REAL=$tmpdir_real" \
+    bash -c "echo test > '$test_file'" 2>/dev/null; then
+    echo "  PASS  Write inside TMPDIR"
+    rm -f "$test_file"
+    ((pass++))
+  else
+    echo "  FAIL  Write inside TMPDIR (should have succeeded)"
+    ((fail++))
+  fi
+
+  # Test 4: Write to HOME (outside boundary — should fail)
+  test_file="${HOME}/.sandbox-test-$$"
+  if sandbox-exec -f "$profile" \
+    -D "PROJECT_DIR=$project_dir" \
+    -D "CLAUDE_HOME=$claude_home" \
+    -D "TMPDIR_REAL=$tmpdir_real" \
+    bash -c "echo test > '$test_file'" 2>/dev/null; then
+    echo "  FAIL  Write to HOME (should have been blocked)"
+    rm -f "$test_file"
+    ((fail++))
+  else
+    echo "  PASS  Write to HOME blocked"
+    ((pass++))
+  fi
+
+  # Test 5: Write to /tmp directly (outside TMPDIR — should fail if TMPDIR != /tmp)
+  if [ "$tmpdir_real" != "/tmp" ] && [ "$tmpdir_real" != "/private/tmp" ]; then
+    test_file="/tmp/sandbox-test-$$"
+    if sandbox-exec -f "$profile" \
+      -D "PROJECT_DIR=$project_dir" \
+      -D "CLAUDE_HOME=$claude_home" \
+      -D "TMPDIR_REAL=$tmpdir_real" \
+      bash -c "echo test > '$test_file'" 2>/dev/null; then
+      echo "  FAIL  Write to /tmp (should have been blocked)"
+      rm -f "$test_file"
+      ((fail++))
+    else
+      echo "  PASS  Write to /tmp blocked"
+      ((pass++))
+    fi
+  fi
+
+  echo ""
+  echo "Results: $pass passed, $fail failed"
+  [ "$fail" -eq 0 ] && return 0 || return 1
 }
 
 # ─── Multi-Repo ──────────────────────────────────────────────────────────────
@@ -232,7 +432,7 @@ Claude Code Shell Shortcuts
 ============================
 
 Core Session:
-  cc [args]                 claude (passthrough, shadows system cc compiler)
+  cc [args]                 claude --chrome (passthrough, shadows system cc compiler)
   ccc [args]                Continue last conversation in this directory
   ccr [search]              Resume a conversation (interactive picker)
   ccf [args]                Fork from last conversation (new session ID)
@@ -264,8 +464,15 @@ Compound Modes:
   cc-budget <$> <prompt>    Budget-capped one-shot (default $2.00)
                               e.g. cc-budget 5.00 "refactor auth module"
 
+Kernel Sandbox (macOS Seatbelt):
+  cc-sbox [args]            Yolo inside kernel sandbox — writes scoped to project
+  cc-sbox-edit [args]       acceptEdits inside kernel sandbox
+  cc-sbox-deep [args]       Opus + yolo + continue inside kernel sandbox
+  cc-sbox-test              Verify sandbox boundaries (run in project dir)
+                              Set CC_SANDBOX_DIR=/path to override project detection
+
 Sandbox Modes:                    (least restricted → most restricted)
-  cc-sandbox [args]         Full autonomy, for use inside Docker/VM
+  cc-vm [args]              Full autonomy, for use inside Docker/VM
                               Set CC_SANDBOX_MODEL=opus to override model
   cc-nobash [args]          Can read + edit files, but no shell execution
   cc-nonet [args]           No WebSearch or WebFetch — air-gapped from web
@@ -281,10 +488,10 @@ Integrations:
   cc-pr [number|url]        Resume or start from a GitHub PR
 
 Composability:
-  Model and permission functions pass through all args, so you can combine:
-    cc-opus --continue                     Opus + continue
-    cc-yolo --model opus                   Yolo + opus
-    cc-edit --continue --model haiku       Accept edits + continue + haiku
+  All functions pass through args to claude (cc includes --chrome), so combine:
+    cc-opus --continue                     Opus + continue + chrome
+    cc-yolo --model opus                   Yolo + opus + chrome
+    cc-edit --continue --model haiku       Accept edits + continue + haiku + chrome
 
   cc-help                   Show this help message
 HELP

@@ -1,0 +1,58 @@
+; claude-sandbox.sb — macOS Seatbelt profile for Claude Code kernel sandbox
+;
+; Deny-default with three parameterized write zones:
+;   PROJECT_DIR  — project/worktree directory (code writes)
+;   CLAUDE_HOME  — ~/.claude (session state, config)
+;   TMPDIR_REAL  — resolved $TMPDIR (Node.js temp files)
+;
+; All reads are allowed — the threat model is preventing writes, not reads.
+; SSH keys are readable (git push works) but not writable.
+; npm/bun caches are not writable — install deps before entering sandbox.
+
+(version 1)
+
+(deny default)
+
+; ─── Read access ─────────────────────────────────────────────────────────────
+; Allow all reads. Enumerating every read path would be fragile across
+; macOS versions and break tools like git, node, and system libraries.
+(allow file-read* (subpath "/"))
+
+; ─── Write zones ─────────────────────────────────────────────────────────────
+; Project directory — the only place code should be written
+(allow file-write* (subpath (param "PROJECT_DIR")))
+
+; Claude home — session state, config, memory, tasks
+(allow file-write* (subpath (param "CLAUDE_HOME")))
+
+; Temp directory — Node.js, npm, and other tools need temp file access
+(allow file-write* (subpath (param "TMPDIR_REAL")))
+
+; ─── Process execution ───────────────────────────────────────────────────────
+; Allow executing programs (git, node, npm, etc.)
+(allow process-exec* (subpath "/"))
+(allow process-fork)
+
+; ─── Network ─────────────────────────────────────────────────────────────────
+; Allow all network access (Claude API, npm registry, git remotes)
+(allow network*)
+
+; ─── System essentials ───────────────────────────────────────────────────────
+; Mach and IOKit for basic system operation
+(allow mach*)
+(allow ipc-posix-shm*)
+(allow iokit-open)
+(allow sysctl-read)
+(allow signal)
+
+; Pseudo-terminals for interactive shell sessions
+(allow file-write* (subpath "/dev/pty"))
+(allow file-write* (subpath "/dev/tty"))
+(allow file-write* (literal "/dev/null"))
+(allow file-write* (literal "/dev/random"))
+(allow file-write* (literal "/dev/urandom"))
+
+; Stdout/stderr
+(allow file-write* (literal "/dev/fd/1"))
+(allow file-write* (literal "/dev/fd/2"))
+(allow file-write* (literal "/dev/fd/0"))

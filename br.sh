@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # br.sh — Lightweight Branch Management for Claude Code
-# Source from ~/.zshrc. Provides: br, br-done, br-pr, br-pr-done, br-list, br-cleanup
+# Source from ~/.zshrc. Provides: br (done, list, cleanup, pr, pr-done, help)
+# Legacy aliases: br-done, br-pr, br-pr-done, br-list, br-cleanup, br-help
 #
 # Tracks "what branch did I branch from?" so you don't have to remember.
 # Metadata stored in .git/branch-meta/<name>.json (local, not tracked).
@@ -88,7 +89,7 @@ _br_time_ago() {
 
 # ─── Main Functions ──────────────────────────────────────────────────────────
 
-br() {
+_br_create() {
   local name="$1"
   local base="$2"
 
@@ -96,12 +97,13 @@ br() {
     echo "Usage: br <name> [base-branch]"
     echo "  Creates a branch and tracks its base for easy merge-back"
     echo ""
-    echo "Related commands:"
-    echo "  br-done [name]       Merge branch back into its base (local)"
-    echo "  br-pr [name]         Push and create PR targeting base"
-    echo "  br-pr-done [name]    Clean up after PR is merged"
-    echo "  br-list              List tracked branches"
-    echo "  br-cleanup <name>    Delete branch without merging"
+    echo "Subcommands:"
+    echo "  br done [name]       Merge branch back into its base (local)"
+    echo "  br pr [name]         Push and create PR targeting base"
+    echo "  br pr-done [name]    Clean up after PR is merged"
+    echo "  br list              List tracked branches"
+    echo "  br cleanup <name>    Delete branch without merging"
+    echo "  br help              Show full help"
     return 1
   fi
 
@@ -161,10 +163,10 @@ br() {
   echo ""
   echo "Branch '$name' created from '$base_branch'"
   echo "  Metadata: $meta_file"
-  echo "  Run 'br-done' when ready to merge back"
+  echo "  Run 'br done' when ready to merge back"
 }
 
-br-done() {
+_br_done() {
   _br_ensure_git || return 1
   _br_check_jq || return 1
 
@@ -274,7 +276,7 @@ br-done() {
   echo "Done. Now on '$base_branch'."
 }
 
-br-list() {
+_br_list() {
   _br_ensure_git || return 1
 
   local meta_dir
@@ -327,7 +329,7 @@ br-list() {
   echo ""
 }
 
-br-cleanup() {
+_br_cleanup() {
   _br_ensure_git || return 1
 
   local name="$1"
@@ -336,7 +338,7 @@ br-cleanup() {
     # Auto-detect current branch
     name="$(_br_current_branch)"
     if [ -z "$name" ]; then
-      echo "Usage: br-cleanup <name>" >&2
+      echo "Usage: br cleanup <name>" >&2
       return 1
     fi
   fi
@@ -412,7 +414,7 @@ br-cleanup() {
   echo "Done."
 }
 
-br-pr() {
+_br_pr() {
   _br_ensure_git || return 1
   _br_check_jq || return 1
   _br_check_gh || return 1
@@ -497,7 +499,7 @@ br-pr() {
   gh pr create --base "$base_branch" "$@"
 }
 
-br-pr-done() {
+_br_pr_done() {
   _br_ensure_git || return 1
   _br_check_jq || return 1
 
@@ -592,40 +594,68 @@ br-pr-done() {
   echo "Done. Now on '$base_branch'."
 }
 
-br-help() {
+_br_help() {
   cat <<'HELP'
 Lightweight Branch Management for Claude Code
 ==============================================
 
-Commands:
+Usage:
   br <name> [base]       Create branch and track its base
                           base defaults to current branch
+  br -- <name>            Force create (bypass subcommand matching)
 
-  br-done [name]         Merge branch back into its base (local)
+Subcommands:
+  br done [name]         Merge branch back into its base (local)
                           Auto-detects current branch if no name given
                           Shows diff summary, prompts before merge
 
-  br-pr [name]           Push branch and create PR targeting base
+  br pr [name]           Push branch and create PR targeting base
                           Auto-detects current branch if no name given
                           Extra args passed to gh pr create
 
-  br-pr-done [name]      Clean up after PR is merged
+  br pr-done [name]      Clean up after PR is merged
                           Switches to base, pulls, deletes local + remote branch
                           Checks PR merge status via gh
 
-  br-list                List tracked branches with status
+  br list                List tracked branches with status
                           Shows: name, base, age, merged/active/deleted
 
-  br-cleanup [name]      Delete branch and metadata without merging
+  br cleanup [name]      Delete branch and metadata without merging
                           Auto-detects current branch if no name given
                           Warns if branch has unmerged changes
 
-  br-help                Show this help message
+  br help                Show this help message
+
+Aliases: br list = br ls, br cleanup = br rm
 
 Metadata:
   Stored in .git/branch-meta/<name>.json (local, not tracked by git)
   Contains: branch name, base branch, creation timestamp
 
-Requirements: git, jq, gh (for br-pr/br-pr-done)
+Requirements: git, jq, gh (for br pr/br pr-done)
 HELP
 }
+
+# ─── Dispatcher ──────────────────────────────────────────────────────────────
+
+br() {
+  if [ "$1" = "--" ]; then shift; _br_create "$@"; return $?; fi
+  case "$1" in
+    done)           shift; _br_done "$@" ;;
+    list|ls)        shift; _br_list "$@" ;;
+    cleanup|rm)     shift; _br_cleanup "$@" ;;
+    pr-done)        shift; _br_pr_done "$@" ;;
+    pr)             shift; _br_pr "$@" ;;
+    help|-h|--help) _br_help ;;
+    *)              _br_create "$@" ;;
+  esac
+}
+
+# ─── Backward-Compat Wrappers ───────────────────────────────────────────────
+
+br-done()    { br done "$@"; }
+br-list()    { br list "$@"; }
+br-cleanup() { br cleanup "$@"; }
+br-pr()      { br pr "$@"; }
+br-pr-done() { br pr-done "$@"; }
+br-help()    { br help; }
