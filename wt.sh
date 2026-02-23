@@ -188,19 +188,21 @@ _wt_acquire_lock() {
   local lockdir="$1"
   local max_wait="${2:-10}"
   local waited=0
+  local lock_pid
 
   while ! mkdir "$lockdir" 2>/dev/null; do
-    local lock_pid
     lock_pid="$(cat "$lockdir/pid" 2>/dev/null)"
-    if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
-      echo "Removing stale lock (PID $lock_pid no longer running)"
+    if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+      # Lock dir exists but no pid file or process is gone — stale lock
+      echo "Removing stale lock${lock_pid:+ (PID $lock_pid no longer running)}"
       rm -rf "$lockdir"
       continue
     fi
     if [ "$waited" -ge "$max_wait" ]; then
-      echo "Error: Could not acquire merge lock after ${max_wait}s (held by PID $lock_pid)" >&2
+      echo "Error: Could not acquire lock after ${max_wait}s (held by PID $lock_pid)" >&2
       return 1
     fi
+    [ "$waited" -eq 0 ] && echo "Waiting for lock (held by PID $lock_pid)..."
     sleep 1
     waited=$((waited + 1))
   done

@@ -339,8 +339,8 @@ _dev_init() {
 
   # Detect Vite
   local has_vite=false
-  for f in "$repo_root"/vite.config.*; do
-    [ -f "$f" ] && { has_vite=true; break; }
+  for ext in js ts mjs mts cjs; do
+    [ -f "$repo_root/vite.config.$ext" ] && { has_vite=true; break; }
   done
   if [ "$has_vite" = false ] && [ -f "$repo_root/package.json" ]; then
     jq -e '.devDependencies.vite // .dependencies.vite' "$repo_root/package.json" &>/dev/null && has_vite=true
@@ -363,8 +363,8 @@ _dev_init() {
 
   # Detect Next.js
   local has_next=false
-  for f in "$repo_root"/next.config.*; do
-    [ -f "$f" ] && { has_next=true; break; }
+  for ext in js ts mjs mts cjs; do
+    [ -f "$repo_root/next.config.$ext" ] && { has_next=true; break; }
   done
   if [ "$has_next" = true ]; then
     echo "  Detected: next (port 3000)"
