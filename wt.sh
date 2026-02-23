@@ -364,6 +364,14 @@ _wt_create() {
     done
   fi
 
+  # Symlink env files from main repo (gitignored files needed for dev servers)
+  for envfile in .env .env.local .env.development .env.development.local; do
+    if [ -f "$repo_root/$envfile" ]; then
+      ln -sfn "$repo_root/$envfile" "$worktree_path/$envfile"
+      echo "  Symlinked $envfile"
+    fi
+  done
+
   # Inject worktree context into CLAUDE.md (git already provides tracked version)
   _wt_inject_worktree_context "$worktree_path/CLAUDE.md" "$project" "$name" "$base_branch" "$worktree_path" "$repo_root"
   echo "  Injected worktree context into CLAUDE.md"
