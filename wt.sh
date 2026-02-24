@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # wt.sh — Git Worktree Management for Claude Code
-# Source from ~/.zshrc. Provides: wt (list, merge, cleanup, cd, help)
+# Source from ~/.zshrc. Provides: wt (list, merge, cleanup, prune, cd, help)
 # Legacy aliases: wt-list, wt-merge, wt-cleanup, wtc, wt-help
 #
 # Requires: jq, git
@@ -114,19 +114,19 @@ _wt_update_main_claude_md() {
   local worktrees_dir="$repo_root/.worktrees"
   local has_worktrees=false
 
+  local meta wt_branch wt_base wt_name wt_status
   if [ -d "$worktrees_dir" ]; then
     while IFS= read -r entry; do
       [ -z "$entry" ] && continue
       [ ! -d "$entry" ] && continue
-      local meta="$entry/.worktree.json"
+      meta="$entry/.worktree.json"
       [ ! -f "$meta" ] && continue
       has_worktrees=true
 
-      local wt_branch wt_base wt_name wt_status
-      wt_branch="$(jq -r '.branch // "-"' "$meta")"
-      wt_base="$(jq -r '.base_branch // "-"' "$meta")"
+      wt_branch="$(jq -r '.branch // "-"' "$meta" 2>/dev/null)"
+      wt_base="$(jq -r '.base_branch // "-"' "$meta" 2>/dev/null)"
       wt_name="$(basename "$entry")"
-      wt_status="$(jq -r '.status // "active"' "$meta")"
+      wt_status="$(jq -r '.status // "active"' "$meta" 2>/dev/null)"
 
       echo "| \`${wt_branch}\` | \`${wt_base}\` | \`.worktrees/${wt_name}\` | ${wt_status} |" >> "$table_file"
     done < <(find "$worktrees_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
@@ -270,6 +270,7 @@ _wt_create() {
     echo "  wt list              List worktrees with status"
     echo "  wt merge [name]      Merge worktree into base branch"
     echo "  wt cleanup <name>    Remove a worktree"
+    echo "  wt prune [--stale|--all]  Batch-remove worktrees"
     echo "  wt cd <name>         cd into an existing worktree"
     echo "  wt help              Show full help"
     return 1
@@ -301,8 +302,44 @@ _wt_create() {
   local worktree_path="$repo_root/.worktrees/$name"
 
   if [ -d "$worktree_path" ]; then
-    echo "Error: Worktree '$name' already exists at $worktree_path" >&2
-    return 1
+    # Check if it's a healthy worktree or a broken leftover
+    if [ -f "$worktree_path/.worktree.json" ] && { [ -d "$worktree_path/.git" ] || [ -f "$worktree_path/.git" ]; }; then
+      echo "Worktree '$name' already exists at $worktree_path"
+      echo "  Branch: $(git -C "$worktree_path" branch --show-current 2>/dev/null || echo "unknown")"
+      echo ""
+      _wt_prompt "cd into it? [Y/n/r] (r = remove and recreate)"
+      case "$REPLY" in
+        [Rr])
+          echo "Removing existing worktree..."
+          git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || {
+            rm -rf "$worktree_path"
+            git -C "$repo_root" worktree prune
+          }
+          ;; # fall through to create
+        [Nn])
+          return 0
+          ;;
+        *)
+          cd "$worktree_path" || return 1
+          echo "Now in: $(pwd)"
+          echo "Branch: $(git branch --show-current)"
+          return 0
+          ;;
+      esac
+    else
+      # Broken leftover — directory exists but not a valid worktree
+      echo "Worktree '$name' exists but appears broken (missing .git or metadata)."
+      _wt_prompt "Remove and recreate? [Y/n]"
+      if [[ "$REPLY" =~ ^[Nn]$ ]]; then
+        return 0
+      fi
+      echo "Removing broken worktree..."
+      git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || {
+        rm -rf "$worktree_path"
+        git -C "$repo_root" worktree prune
+      }
+      # fall through to create
+    fi
   fi
 
   # Resolve base to a branch name for metadata
@@ -414,36 +451,40 @@ _wt_list() {
   printf "%-25s %-20s %-15s %-20s %s\n" "----" "------" "----" "-----------" "------"
 
   local has_entries=false
+  local name meta branch base wt_status last_commit commit_epoch now_epoch age_days
 
   while IFS= read -r entry; do
     [ -z "$entry" ] && continue
     [ ! -d "$entry" ] && continue
     has_entries=true
 
-    local name
     name="$(basename "$entry")"
-    local meta="$entry/.worktree.json"
+    meta="$entry/.worktree.json"
 
-    local branch="-" base="-" wt_status="unknown"
+    branch="-"
+    base="-"
+    wt_status="unknown"
     if [ -f "$meta" ] && command -v jq &>/dev/null; then
-      branch="$(jq -r '.branch // "-"' "$meta")"
-      base="$(jq -r '.base_branch // "-"' "$meta")"
-      wt_status="$(jq -r '.status // "unknown"' "$meta")"
+      branch="$(jq -r '.branch // "-"' "$meta" 2>/dev/null)"
+      base="$(jq -r '.base_branch // "-"' "$meta" 2>/dev/null)"
+      wt_status="$(jq -r '.status // "unknown"' "$meta" 2>/dev/null)"
     fi
 
     # Get last commit age
-    local last_commit="-"
+    last_commit="-"
     if [ -d "$entry/.git" ] || [ -f "$entry/.git" ]; then
       last_commit="$(git -C "$entry" log -1 --format='%cr' 2>/dev/null || echo "-")"
 
       # Staleness detection (>7 days since last commit)
-      local commit_epoch now_epoch age_days
       commit_epoch="$(git -C "$entry" log -1 --format='%ct' 2>/dev/null || echo "0")"
       now_epoch="$(date +%s)"
       age_days=$(( (now_epoch - commit_epoch) / 86400 ))
       if [ "$age_days" -gt 7 ]; then
         wt_status="stale"
       fi
+    elif [ ! -f "$meta" ]; then
+      # No .git and no metadata — partially created worktree from failed git worktree add
+      wt_status="broken"
     fi
 
     printf "%-25s %-20s %-15s %-20s %s\n" "$name" "$branch" "$base" "$last_commit" "$wt_status"
@@ -706,6 +747,10 @@ Subcommands:
                           Includes pre-merge diff, lockfile for parallel safety
   wt cleanup <name>      Remove a worktree (prompts for confirmation)
                           Auto-detects from current dir if no name given
+  wt prune [--stale|--all]  Batch-remove worktrees
+                          (default) interactive: prompt for each worktree
+                          --stale: only stale (>7d) and broken worktrees
+                          --all: all worktrees (prompts for each)
   wt cd <name>           cd into an existing worktree
   wt help                Show this help message
 
@@ -734,6 +779,166 @@ Requirements: git, jq
 HELP
 }
 
+_wt_prune() {
+  local mode="interactive"  # interactive, stale, all
+  case "$1" in
+    --stale) mode="stale" ;;
+    --all)   mode="all" ;;
+  esac
+
+  local repo_root
+  repo_root="$(_wt_ensure_git_root)" || return 1
+
+  local worktrees_dir="$repo_root/.worktrees"
+
+  if [ ! -d "$worktrees_dir" ]; then
+    echo "No .worktrees/ directory found. Nothing to prune."
+    return 0
+  fi
+
+  # Collect candidates (use 1-based indexing for zsh compat)
+  local candidates names branches statuses ages
+  candidates=() names=() branches=() statuses=() ages=()
+  local count=0
+  local name meta branch base wt_status last_commit commit_epoch now_epoch age_days
+  local dominated
+
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    [ ! -d "$entry" ] && continue
+
+    name="$(basename "$entry")"
+    meta="$entry/.worktree.json"
+
+    branch="-"
+    wt_status="unknown"
+    age_days=0
+
+    if [ -f "$meta" ] && command -v jq &>/dev/null; then
+      branch="$(jq -r '.branch // "-"' "$meta" 2>/dev/null)"
+      wt_status="$(jq -r '.status // "unknown"' "$meta" 2>/dev/null)"
+    fi
+
+    if [ -d "$entry/.git" ] || [ -f "$entry/.git" ]; then
+      commit_epoch="$(git -C "$entry" log -1 --format='%ct' 2>/dev/null || echo "0")"
+      now_epoch="$(date +%s)"
+      age_days=$(( (now_epoch - commit_epoch) / 86400 ))
+      if [ "$age_days" -gt 7 ]; then
+        wt_status="stale"
+      fi
+    elif [ ! -f "$meta" ]; then
+      wt_status="broken"
+    fi
+
+    # Filter based on mode
+    dominated=false
+    case "$mode" in
+      stale)
+        if [ "$wt_status" = "stale" ] || [ "$wt_status" = "broken" ]; then
+          dominated=true
+        fi
+        ;;
+      all)
+        dominated=true
+        ;;
+      interactive)
+        dominated=true
+        ;;
+    esac
+
+    if [ "$dominated" = true ]; then
+      count=$((count + 1))
+      candidates[$count]="$entry"
+      names[$count]="$name"
+      branches[$count]="$branch"
+      statuses[$count]="$wt_status"
+      ages[$count]="$age_days"
+    fi
+  done < <(find "$worktrees_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+
+  if [ "$count" -eq 0 ]; then
+    echo "No worktrees to prune."
+    git -C "$repo_root" worktree prune
+    return 0
+  fi
+
+  echo ""
+  echo "Worktrees to prune ($mode mode):"
+  echo ""
+  printf "  %-25s %-20s %-10s %s\n" "NAME" "BRANCH" "STATUS" "AGE (days)"
+  printf "  %-25s %-20s %-10s %s\n" "----" "------" "------" "----------"
+  local i=1
+  while [ "$i" -le "$count" ]; do
+    printf "  %-25s %-20s %-10s %s\n" "${names[$i]}" "${branches[$i]}" "${statuses[$i]}" "${ages[$i]}"
+    i=$((i + 1))
+  done
+  echo ""
+
+  local approve_all=false
+  local removed=0
+  local entry wt_name wt_branch wt_stat
+
+  i=1
+  while [ "$i" -le "$count" ]; do
+    entry="${candidates[$i]}"
+    wt_name="${names[$i]}"
+    wt_branch="${branches[$i]}"
+    wt_stat="${statuses[$i]}"
+
+    if [ "$approve_all" = true ]; then
+      # Auto-approve remaining
+      true
+    elif [ "$mode" = "interactive" ] || [ "$mode" = "stale" ]; then
+      printf "Remove '%s' (branch: %s, status: %s)? [y/N/a] " "$wt_name" "$wt_branch" "$wt_stat"
+      read -r REPLY
+      case "$REPLY" in
+        [Yy]) ;;
+        [Aa]) approve_all=true ;;
+        *)    echo "  Skipped."; i=$((i + 1)); continue ;;
+      esac
+    fi
+
+    # Remove worktree (reuse _wt_cleanup's removal logic)
+
+    # If we're inside the worktree being removed, move out
+    if [[ "$(pwd)/" == "$entry/"* ]]; then
+      cd "$repo_root" || true
+    fi
+
+    git -C "$repo_root" worktree remove "$entry" --force 2>/dev/null || {
+      rm -rf "$entry"
+    }
+    echo "  Removed worktree '$wt_name'."
+
+    # Optionally delete branch
+    if [ -n "$wt_branch" ] && [ "$wt_branch" != "-" ]; then
+      if [ "$approve_all" = true ]; then
+        git -C "$repo_root" branch -d "$wt_branch" 2>/dev/null || git -C "$repo_root" branch -D "$wt_branch" 2>/dev/null
+        echo "  Deleted branch '$wt_branch'."
+      else
+        printf "  Delete branch '%s'? [y/N] " "$wt_branch"
+        read -r REPLY
+        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+          git -C "$repo_root" branch -d "$wt_branch" 2>/dev/null || git -C "$repo_root" branch -D "$wt_branch" 2>/dev/null
+          echo "  Deleted branch '$wt_branch'."
+        fi
+      fi
+    fi
+
+    removed=$((removed + 1))
+    i=$((i + 1))
+  done
+
+  # Clean up git's internal refs
+  git -C "$repo_root" worktree prune
+
+  # Update main CLAUDE.md map
+  _wt_update_main_claude_md "$repo_root"
+
+  echo ""
+  echo "Pruned $removed worktree(s). Git worktree refs cleaned."
+}
+
 # ─── Dispatcher ──────────────────────────────────────────────────────────────
 
 wt() {
@@ -742,6 +947,7 @@ wt() {
     list|ls)        shift; _wt_list "$@" ;;
     merge)          shift; _wt_merge "$@" ;;
     cleanup|rm)     shift; _wt_cleanup "$@" ;;
+    prune)          shift; _wt_prune "$@" ;;
     cd)             shift; _wtc "$@" ;;
     help|-h|--help) _wt_help ;;
     *)              _wt_create "$@" ;;
@@ -753,5 +959,6 @@ wt() {
 wt-list()    { wt list "$@"; }
 wt-merge()   { wt merge "$@"; }
 wt-cleanup() { wt cleanup "$@"; }
+wt-prune()   { wt prune "$@"; }
 wtc()        { wt cd "$@"; }
 wt-help()    { wt help; }
