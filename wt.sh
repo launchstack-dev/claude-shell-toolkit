@@ -214,6 +214,46 @@ _wt_release_lock() {
   rm -rf "$1"
 }
 
+# ─── Process Cleanup ─────────────────────────────────────────────────────────
+
+_wt_kill_procs() {
+  local worktree_path="$1"
+  local name="$2"
+  local force="$3"  # "true" = skip prompts, auto-kill
+
+  # Try _dev_stop first (port-based, clean shutdown) — only in interactive mode
+  if [ "$force" != "true" ] && type _dev_stop &>/dev/null; then
+    _dev_stop "$name" 2>/dev/null || true
+  fi
+
+  # Sweep remaining processes with open files under the worktree path
+  # Use +d (non-recursive) to avoid slow scans on large node_modules trees
+  local pids
+  pids="$(lsof +d "$worktree_path" -t 2>/dev/null | sort -u)" || true
+
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+
+  echo "Found processes running in worktree '$name':"
+  local pid comm
+  for pid in $pids; do
+    comm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
+    if [ "$force" = "true" ]; then
+      kill "$pid" 2>/dev/null && echo "  Killed $comm (PID $pid)" || true
+    else
+      _wt_prompt "  Kill $comm (PID $pid)? [y/N]"
+      if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        kill "$pid" 2>/dev/null && echo "  Killed." || echo "  Already exited."
+      else
+        echo "  Skipped."
+      fi
+    fi
+  done
+
+  return 0
+}
+
 # ─── Project Setup ───────────────────────────────────────────────────────────
 
 _wt_run_project_setup() {
@@ -679,6 +719,9 @@ _wt_cleanup() {
     branch="$(jq -r '.branch // ""' "$worktree_path/.worktree.json")"
   fi
 
+  # Kill any processes running inside the worktree
+  _wt_kill_procs "$worktree_path" "$name" "false"
+
   # If we're inside the worktree being removed, move out
   if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
     cd "$repo_root" || true
@@ -901,6 +944,9 @@ _wt_prune() {
         *)    echo "  Skipped."; i=$((i + 1)); continue ;;
       esac
     fi
+
+    # Kill any processes running inside the worktree
+    _wt_kill_procs "$entry" "$wt_name" "$approve_all"
 
     # Remove worktree (reuse _wt_cleanup's removal logic)
 
