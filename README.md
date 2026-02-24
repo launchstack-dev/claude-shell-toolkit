@@ -44,12 +44,13 @@ Creates isolated git worktrees with Claude-aware boundaries so parallel Claude i
 
 | Command | Purpose |
 |---------|---------|
-| `wt <name> [base]` | Create worktree, inject Claude context, cd into it |
-| `wt-list` | List worktrees with status + stale detection |
-| `wt-merge [name]` | Merge into base branch with pre-merge diff + lockfile |
-| `wt-cleanup <name>` | Remove worktree, update CLAUDE.md map |
-| `wtc <name>` | Quick cd into existing worktree |
-| `wt-help` | Show all commands |
+| `wt <name> [base]` | Create worktree, inject Claude context, cd into it. If it already exists, offers to cd or recreate. Auto-cleans broken leftovers. |
+| `wt list` | List worktrees with status + stale detection. Broken worktrees (failed creates) labeled as `broken`. |
+| `wt merge [name]` | Merge into base branch with pre-merge diff + lockfile |
+| `wt cleanup <name>` | Remove worktree, update CLAUDE.md map |
+| `wt prune [--stale\|--all]` | Batch-remove worktrees. Default: interactive prompt per worktree. `--stale`: only stale (>7d) + broken. `--all`: remove all without prompting. |
+| `wt cd <name>` | Quick cd into existing worktree |
+| `wt help` | Show all commands |
 
 ### What `wt` Creates
 
@@ -357,7 +358,10 @@ dev billing-ui
 dev-ps
 
 # When done, merge and clean up
-wt-merge auth-feature
+wt merge auth-feature
+
+# Or batch-clean stale/broken worktrees
+wt prune --stale
 
 # Or use branch management for lighter-weight work
 br quick-fix
@@ -371,7 +375,7 @@ br-pr-done         # clean up after merge
 - Shell: bash and zsh
 - Terminal: Ghostty (tab renaming, split keybindings in instructions)
 - Works with the [superpowers `using-git-worktrees` skill](https://github.com/anthropics/claude-code-plugins)
-- Worktrees created by other tools show in `wt-list` via `git worktree list`
+- Worktrees created by other tools show in `wt list` via `git worktree list`
 
 ## License
 
