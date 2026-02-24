@@ -776,6 +776,9 @@ Optional main repo guard:
   See: ~/.claude/scripts/wt-guard.sh for installation instructions.
 
 Requirements: git, jq
+
+Reload after changes:
+  source ~/.zshrc
 HELP
 }
 
