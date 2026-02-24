@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wt.sh — Git Worktree Management for Claude Code
 # Source from ~/.zshrc. Provides: wt (list, merge, cleanup, prune, cd, help)
-# Legacy aliases: wt-list, wt-merge, wt-cleanup, wtc, wt-help
+# Legacy aliases: wt-list, wt-merge, wt-cleanup, wt-prune, wtc, wt-help
 #
 # Requires: jq, git
 
@@ -329,8 +329,8 @@ _wt_create() {
     else
       # Broken leftover — directory exists but not a valid worktree
       echo "Worktree '$name' exists but appears broken (missing .git or metadata)."
-      _wt_prompt "Remove and recreate? [Y/n]"
-      if [[ "$REPLY" =~ ^[Nn]$ ]]; then
+      _wt_prompt "Remove and recreate? [y/N]"
+      if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
         return 0
       fi
       echo "Removing broken worktree..."
@@ -750,7 +750,7 @@ Subcommands:
   wt prune [--stale|--all]  Batch-remove worktrees
                           (default) interactive: prompt for each worktree
                           --stale: only stale (>7d) and broken worktrees
-                          --all: all worktrees (prompts for each)
+                          --all: all worktrees (no per-item prompt)
   wt cd <name>           cd into an existing worktree
   wt help                Show this help message
 
@@ -875,6 +875,7 @@ _wt_prune() {
   echo ""
 
   local approve_all=false
+  [ "$mode" = "all" ] && approve_all=true
   local removed=0
   local entry wt_name wt_branch wt_stat
 
@@ -907,6 +908,7 @@ _wt_prune() {
 
     git -C "$repo_root" worktree remove "$entry" --force 2>/dev/null || {
       rm -rf "$entry"
+      git -C "$repo_root" worktree prune
     }
     echo "  Removed worktree '$wt_name'."
 
