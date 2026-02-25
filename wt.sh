@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wt.sh — Git Worktree Management for Claude Code
-# Source from ~/.zshrc. Provides: wt (list, merge, cleanup, prune, cd, help)
-# Legacy aliases: wt-list, wt-merge, wt-cleanup, wt-prune, wtc, wt-help
+# Source from ~/.zshrc. Provides: wt (list, merge, rebase, cleanup, prune, cd, help)
+# Legacy aliases: wt-list, wt-merge, wt-rebase, wt-cleanup, wt-prune, wtc, wt-help
 #
 # Requires: jq, git
 
@@ -226,18 +226,49 @@ _wt_kill_procs() {
     _dev_stop "$name" 2>/dev/null || true
   fi
 
-  # Sweep remaining processes with open files under the worktree path
-  # Use +d (non-recursive) to avoid slow scans on large node_modules trees
-  local pids
-  pids="$(lsof +d "$worktree_path" -t 2>/dev/null | sort -u)" || true
+  # Find processes whose CWD is under the worktree path (catches nested dirs)
+  # Falls back to lsof +d if the CWD approach finds nothing
+  local pids="" pid cwd comm
+  while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    cwd="$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)" || continue
+    if [[ "$cwd/" == "$worktree_path/"* ]]; then
+      pids="$pids $pid"
+    fi
+  done < <(ps -eo pid= -o comm= 2>/dev/null | awk '{print $1}')
+
+  # Also catch processes with open files directly in the worktree root
+  local lsof_pids
+  lsof_pids="$(timeout 5 lsof +d "$worktree_path" -t 2>/dev/null | sort -u)" || true
+  if [ -n "$lsof_pids" ]; then
+    pids="$pids $lsof_pids"
+  fi
+
+  # Deduplicate
+  pids="$(echo "$pids" | tr ' ' '\n' | sort -un | tr '\n' ' ')"
+  pids="${pids## }"
+  pids="${pids%% }"
 
   if [ -z "$pids" ]; then
     return 0
   fi
 
-  echo "Found processes running in worktree '$name':"
-  local pid comm
+  # Separate Claude Code / agent processes from everything else
+  local cc_pids="" other_pids=""
+  local has_cc=false
   for pid in $pids; do
+    comm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
+    # Claude Code runs as node with "claude" in args, or as the claude binary
+    if [[ "$comm" == *claude* ]] || ps -p "$pid" -o args= 2>/dev/null | grep -q "claude"; then
+      cc_pids="$cc_pids $pid"
+      has_cc=true
+    else
+      other_pids="$other_pids $pid"
+    fi
+  done
+
+  # Auto-kill non-Claude processes
+  for pid in $other_pids; do
     comm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
     if [ "$force" = "true" ]; then
       kill "$pid" 2>/dev/null && echo "  Killed $comm (PID $pid)" || true
@@ -250,6 +281,25 @@ _wt_kill_procs() {
       fi
     fi
   done
+
+  # Warn about Claude Code sessions — don't auto-kill
+  if [ "$has_cc" = true ]; then
+    echo ""
+    echo "⚠  Active Claude Code sessions in worktree '$name':"
+    for pid in $cc_pids; do
+      echo "  PID $pid: $(ps -p "$pid" -o args= 2>/dev/null | head -c 80)"
+    done
+    echo ""
+    _wt_prompt "Kill Claude Code sessions? They may have in-flight work. [y/N]"
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+      for pid in $cc_pids; do
+        kill "$pid" 2>/dev/null && echo "  Killed PID $pid" || true
+      done
+    else
+      echo "  Skipped. Close them manually, then re-run."
+      return 1
+    fi
+  fi
 
   return 0
 }
@@ -309,7 +359,9 @@ _wt_create() {
     echo "Subcommands:"
     echo "  wt list              List worktrees with status"
     echo "  wt merge [name]      Merge worktree into base branch"
+    echo "  wt rebase [name]     Rebase worktree onto latest base branch"
     echo "  wt cleanup <name>    Remove a worktree"
+    echo "  wt done [name]       Post-merge: cleanup + checkout base + pull"
     echo "  wt prune [--stale|--all]  Batch-remove worktrees"
     echo "  wt cd <name>         cd into an existing worktree"
     echo "  wt help              Show full help"
@@ -788,8 +840,13 @@ Subcommands:
   wt merge [name]        Merge worktree into its base branch
                           Auto-detects from current dir if no name given
                           Includes pre-merge diff, lockfile for parallel safety
+  wt rebase [name]       Rebase worktree branch onto its base branch
+                          Auto-detects from current dir if no name given
+                          Fetches origin first, shows commits being rebased
   wt cleanup <name>      Remove a worktree (prompts for confirmation)
                           Auto-detects from current dir if no name given
+  wt done [name]         Post-merge cleanup: remove worktree, delete branch,
+                          checkout base, pull. Auto-detects from current dir.
   wt prune [--stale|--all]  Batch-remove worktrees
                           (default) interactive: prompt for each worktree
                           --stale: only stale (>7d) and broken worktrees
@@ -990,6 +1047,170 @@ _wt_prune() {
   echo "Pruned $removed worktree(s). Git worktree refs cleaned."
 }
 
+_wt_rebase() {
+  _wt_check_jq || return 1
+
+  local name="$1"
+  local repo_root meta worktree_path
+
+  repo_root="$(_wt_ensure_git_root)" || return 1
+
+  if [ -n "$name" ]; then
+    worktree_path="$repo_root/.worktrees/$name"
+    meta="$worktree_path/.worktree.json"
+  else
+    # Auto-detect from current directory
+    worktree_path="$(pwd)"
+    meta="$worktree_path/.worktree.json"
+  fi
+
+  if [ ! -f "$meta" ]; then
+    echo "Error: Not in a managed worktree (no .worktree.json found)." >&2
+    echo "Usage: wt rebase [name]  (run from worktree or pass name)" >&2
+    return 1
+  fi
+
+  local branch base_branch
+  branch="$(jq -r '.branch' "$meta")"
+  base_branch="$(jq -r '.base_branch' "$meta")"
+  name="${name:-$branch}"
+
+  echo "Rebasing worktree '$name' (branch: $branch) onto '$base_branch'"
+  echo ""
+
+  # Check for uncommitted changes
+  if ! git -C "$worktree_path" diff --quiet 2>/dev/null || ! git -C "$worktree_path" diff --cached --quiet 2>/dev/null; then
+    echo "Error: Uncommitted changes in worktree '$name':" >&2
+    git -C "$worktree_path" status --short
+    echo ""
+    echo "Commit or stash changes before rebasing." >&2
+    return 1
+  fi
+
+  # Determine rebase target — prefer origin/<base> for latest remote state
+  local rebase_target="$base_branch"
+  if git -C "$repo_root" rev-parse --verify "origin/$base_branch" &>/dev/null; then
+    echo "Fetching latest from origin..."
+    if git -C "$repo_root" fetch origin "$base_branch" 2>&1; then
+      rebase_target="origin/$base_branch"
+    else
+      echo "Warning: fetch failed, rebasing onto local '$base_branch'."
+    fi
+  fi
+
+  # Show what will be rebased
+  local commits
+  commits="$(git -C "$worktree_path" log --oneline "${rebase_target}..HEAD" 2>/dev/null)"
+  if [ -z "$commits" ]; then
+    echo "Branch '$branch' is already up to date with '$rebase_target'."
+    return 0
+  fi
+
+  echo "Commits to rebase onto '$rebase_target':"
+  echo "$commits"
+  echo ""
+
+  # Perform rebase
+  if git -C "$worktree_path" rebase "$rebase_target"; then
+    echo ""
+    echo "Rebased '$branch' onto '$rebase_target' successfully."
+  else
+    echo ""
+    echo "Rebase conflict — resolve in: $worktree_path" >&2
+    echo "  git -C $worktree_path rebase --continue" >&2
+    echo "  git -C $worktree_path rebase --abort" >&2
+    return 1
+  fi
+}
+
+_wt_done() {
+  local name="$1"
+
+  _wt_check_jq || return 1
+
+  local repo_root
+  repo_root="$(_wt_ensure_git_root)" || return 1
+
+  # Auto-detect from current directory if no name given
+  if [ -z "$name" ]; then
+    if [ -f "$PWD/.worktree.json" ]; then
+      name="$(jq -r '.branch' "$PWD/.worktree.json" 2>/dev/null)"
+    fi
+    if [ -z "$name" ]; then
+      echo "Usage: wt done [name]  (run from worktree or pass name)" >&2
+      return 1
+    fi
+  fi
+
+  local worktree_path="$repo_root/.worktrees/$name"
+
+  if [ ! -d "$worktree_path" ]; then
+    echo "Error: Worktree '$name' not found at $worktree_path" >&2
+    return 1
+  fi
+
+  # Read metadata
+  local meta="$worktree_path/.worktree.json"
+  local branch="$name"
+  local base_branch="main"
+  if [ -f "$meta" ]; then
+    branch="$(jq -r '.branch // "'"$name"'"' "$meta" 2>/dev/null)"
+    base_branch="$(jq -r '.base_branch // "main"' "$meta" 2>/dev/null)"
+  fi
+
+  # Warn about uncommitted changes
+  if ! git -C "$worktree_path" diff --quiet 2>/dev/null || ! git -C "$worktree_path" diff --cached --quiet 2>/dev/null; then
+    echo "Warning: Worktree '$name' has uncommitted changes:"
+    git -C "$worktree_path" status --short
+    echo ""
+    _wt_prompt "Continue? Uncommitted changes will be lost. [y/N]"
+    if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+      echo "Aborted."
+      return 1
+    fi
+  fi
+
+  echo "Finishing worktree '$name' (branch: $branch, base: $base_branch)"
+  echo ""
+
+  # Kill processes in the worktree
+  _wt_kill_procs "$worktree_path" "$name" "true"
+
+  # Move out if inside the worktree
+  if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
+    cd "$repo_root" || return 1
+  fi
+
+  # Remove worktree
+  git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || {
+    rm -rf "$worktree_path"
+    git -C "$repo_root" worktree prune
+  }
+  echo "Removed worktree '$name'."
+
+  # Delete local branch
+  git -C "$repo_root" branch -d "$branch" 2>/dev/null || git -C "$repo_root" branch -D "$branch" 2>/dev/null
+  echo "Deleted local branch '$branch'."
+
+  # Delete remote branch
+  if git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
+    _wt_prompt "Delete remote branch 'origin/$branch'? [Y/n]"
+    if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
+      git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "Deleted remote branch '$branch'." || echo "Warning: Could not delete remote branch."
+    fi
+  fi
+
+  # Checkout base branch and pull
+  echo ""
+  git -C "$repo_root" checkout "$base_branch" && git -C "$repo_root" pull
+  echo ""
+
+  # Update main CLAUDE.md map
+  _wt_update_main_claude_md "$repo_root"
+
+  echo "Done. You're on '$base_branch' at $repo_root"
+}
+
 # ─── Dispatcher ──────────────────────────────────────────────────────────────
 
 wt() {
@@ -997,7 +1218,9 @@ wt() {
   case "$1" in
     list|ls)        shift; _wt_list "$@" ;;
     merge)          shift; _wt_merge "$@" ;;
+    rebase)         shift; _wt_rebase "$@" ;;
     cleanup|rm)     shift; _wt_cleanup "$@" ;;
+    done)           shift; _wt_done "$@" ;;
     prune)          shift; _wt_prune "$@" ;;
     cd)             shift; _wtc "$@" ;;
     help|-h|--help) _wt_help ;;
@@ -1009,6 +1232,7 @@ wt() {
 
 wt-list()    { wt list "$@"; }
 wt-merge()   { wt merge "$@"; }
+wt-rebase()  { wt rebase "$@"; }
 wt-cleanup() { wt cleanup "$@"; }
 wt-prune()   { wt prune "$@"; }
 wtc()        { wt cd "$@"; }
