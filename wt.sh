@@ -90,6 +90,12 @@ _wt_inject_worktree_context() {
 5. **Do not create new branches** without explicit user instruction.
 6. **Verify at session start:** \`pwd && git branch --show-current\`
 7. **Do not modify this section.** It is auto-generated.
+
+### Lifecycle
+Tell the user to run these from the **main repo terminal** (not from within this worktree):
+- \`wt rebase ${branch}\` — rebase onto latest \`${base}\`
+- \`wt merge ${branch}\` — merge into \`${base}\` and optionally clean up
+- \`wt done ${branch}\` — remove worktree, delete branch, checkout \`${base}\`
 WTCONTEXT
 }
 
@@ -839,7 +845,7 @@ Git Worktree Management for Claude Code
 Usage:
   wt <name> [base]       Create worktree in .worktrees/<name>, cd into it
                           base defaults to current branch (HEAD)
-  wt -- <name>            Force create (bypass subcommand matching)
+  wt -- <name> [base]     Force create (bypass subcommand matching)
 
 Subcommands:
   wt list                List all worktrees with status + stale detection
