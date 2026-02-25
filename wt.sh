@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wt.sh — Git Worktree Management for Claude Code
-# Source from ~/.zshrc. Provides: wt (list, merge, rebase, cleanup, prune, cd, help)
-# Legacy aliases: wt-list, wt-merge, wt-rebase, wt-cleanup, wt-prune, wtc, wt-help
+# Source from ~/.zshrc. Provides: wt (list, merge, rebase, cleanup, done, prune, cd, help)
+# Legacy aliases: wt-list, wt-merge, wt-rebase, wt-cleanup, wt-done, wt-prune, wtc, wt-help
 #
 # Requires: jq, git
 
@@ -282,22 +282,28 @@ _wt_kill_procs() {
     fi
   done
 
-  # Warn about Claude Code sessions — don't auto-kill
+  # Handle Claude Code sessions — prompt unless force mode
   if [ "$has_cc" = true ]; then
-    echo ""
-    echo "⚠  Active Claude Code sessions in worktree '$name':"
-    for pid in $cc_pids; do
-      echo "  PID $pid: $(ps -p "$pid" -o args= 2>/dev/null | head -c 80)"
-    done
-    echo ""
-    _wt_prompt "Kill Claude Code sessions? They may have in-flight work. [y/N]"
-    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    if [ "$force" = "true" ]; then
       for pid in $cc_pids; do
-        kill "$pid" 2>/dev/null && echo "  Killed PID $pid" || true
+        kill "$pid" 2>/dev/null && echo "  Killed Claude Code (PID $pid)" || true
       done
     else
-      echo "  Skipped. Close them manually, then re-run."
-      return 1
+      echo ""
+      echo "⚠  Active Claude Code sessions in worktree '$name':"
+      for pid in $cc_pids; do
+        echo "  PID $pid: $(ps -p "$pid" -o args= 2>/dev/null | head -c 80)"
+      done
+      echo ""
+      _wt_prompt "Kill Claude Code sessions? They may have in-flight work. [y/N]"
+      if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        for pid in $cc_pids; do
+          kill "$pid" 2>/dev/null && echo "  Killed PID $pid" || true
+        done
+      else
+        echo "  Skipped. Close them manually, then re-run."
+        return 1
+      fi
     fi
   fi
 
@@ -772,7 +778,7 @@ _wt_cleanup() {
   fi
 
   # Kill any processes running inside the worktree
-  _wt_kill_procs "$worktree_path" "$name" "false"
+  _wt_kill_procs "$worktree_path" "$name" "false" || return 1
 
   # If we're inside the worktree being removed, move out
   if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
@@ -1003,7 +1009,11 @@ _wt_prune() {
     fi
 
     # Kill any processes running inside the worktree
-    _wt_kill_procs "$entry" "$wt_name" "$approve_all"
+    if ! _wt_kill_procs "$entry" "$wt_name" "$approve_all"; then
+      echo "  Skipped '$wt_name' (processes still running)."
+      i=$((i + 1))
+      continue
+    fi
 
     # Remove worktree (reuse _wt_cleanup's removal logic)
 
@@ -1057,6 +1067,10 @@ _wt_rebase() {
 
   if [ -n "$name" ]; then
     worktree_path="$repo_root/.worktrees/$name"
+    if [ ! -d "$worktree_path" ]; then
+      echo "Error: Worktree '$name' not found at $worktree_path" >&2
+      return 1
+    fi
     meta="$worktree_path/.worktree.json"
   else
     # Auto-detect from current directory
@@ -1109,6 +1123,12 @@ _wt_rebase() {
   echo "Commits to rebase onto '$rebase_target':"
   echo "$commits"
   echo ""
+
+  _wt_prompt "Proceed with rebase? [y/N]"
+  if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    return 0
+  fi
 
   # Perform rebase
   if git -C "$worktree_path" rebase "$rebase_target"; then
@@ -1174,7 +1194,7 @@ _wt_done() {
   echo ""
 
   # Kill processes in the worktree
-  _wt_kill_procs "$worktree_path" "$name" "true"
+  _wt_kill_procs "$worktree_path" "$name" "true" || return 1
 
   # Move out if inside the worktree
   if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
@@ -1233,6 +1253,7 @@ wt() {
 wt-list()    { wt list "$@"; }
 wt-merge()   { wt merge "$@"; }
 wt-rebase()  { wt rebase "$@"; }
+wt-done()    { wt done "$@"; }
 wt-cleanup() { wt cleanup "$@"; }
 wt-prune()   { wt prune "$@"; }
 wtc()        { wt cd "$@"; }
