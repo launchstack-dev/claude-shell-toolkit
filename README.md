@@ -47,7 +47,9 @@ Creates isolated git worktrees with Claude-aware boundaries so parallel Claude i
 | `wt <name> [base]` | Create worktree, inject Claude context, cd into it. If it already exists, offers to cd or recreate. Auto-cleans broken leftovers. |
 | `wt list` | List worktrees with status + stale detection. Broken worktrees (failed creates) labeled as `broken`. |
 | `wt merge [name]` | Merge into base branch with pre-merge diff + lockfile |
+| `wt rebase [name]` | Rebase worktree branch onto latest base branch. Fetches origin, shows commits, prompts before executing. |
 | `wt cleanup <name>` | Remove worktree, update CLAUDE.md map |
+| `wt done [name]` | Post-merge cleanup: remove worktree, delete local+remote branch, checkout base, pull |
 | `wt prune [--stale\|--all]` | Batch-remove worktrees. Default: interactive prompt per worktree. `--stale`: only stale (>7d) + broken. `--all`: remove all without prompting. |
 | `wt cd <name>` | Quick cd into existing worktree |
 | `wt help` | Show all commands |
@@ -357,8 +359,14 @@ dev billing-ui
 # Check what's running across all worktrees
 dev-ps
 
+# Keep your branch up to date with main
+wt rebase auth-feature
+
 # When done, merge and clean up
 wt merge auth-feature
+
+# Or if merged via PR, just clean up
+wt done auth-feature
 
 # Or batch-clean stale/broken worktrees
 wt prune --stale
