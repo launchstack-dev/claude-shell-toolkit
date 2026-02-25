@@ -1199,6 +1199,24 @@ _wt_done() {
   echo "Finishing worktree '$name' (branch: $branch, base: $base_branch)"
   echo ""
 
+  # Check if branch has been merged into base (try local ref, then origin/)
+  local branch_merged=false
+  git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null
+  if git -C "$repo_root" merge-base --is-ancestor "$branch" "$base_branch" 2>/dev/null; then
+    branch_merged=true
+  elif git -C "$repo_root" merge-base --is-ancestor "origin/$branch" "$base_branch" 2>/dev/null; then
+    branch_merged=true
+  fi
+
+  if [ "$branch_merged" = false ]; then
+    echo "Warning: Branch '$branch' has NOT been merged into '$base_branch'."
+    _wt_prompt "Continue without merging? [y/N]"
+    if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+      echo "Run 'wt merge $name' then 'wt done $name'."
+      return 1
+    fi
+  fi
+
   # Kill processes in the worktree
   _wt_kill_procs "$worktree_path" "$name" "true" || return 1
 
@@ -1218,17 +1236,39 @@ _wt_done() {
   git -C "$repo_root" branch -d "$branch" 2>/dev/null || git -C "$repo_root" branch -D "$branch" 2>/dev/null
   echo "Deleted local branch '$branch'."
 
-  # Delete remote branch
+  # Delete remote branch (with merge status context)
   if git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
-    _wt_prompt "Delete remote branch 'origin/$branch'? [Y/n]"
-    if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
+    local do_delete=false
+    if [ "$branch_merged" = true ]; then
+      echo "Branch '$branch' is merged into '$base_branch'."
+      _wt_prompt "Delete remote branch 'origin/$branch'? [Y/n]"
+      [[ ! "$REPLY" =~ ^[Nn]$ ]] && do_delete=true
+    else
+      echo "Branch '$branch' is NOT merged into '$base_branch'."
+      _wt_prompt "Delete unmerged remote branch 'origin/$branch'? [y/N]"
+      [[ "$REPLY" =~ ^[Yy]$ ]] && do_delete=true
+    fi
+    if [ "$do_delete" = true ]; then
       git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "Deleted remote branch '$branch'." || echo "Warning: Could not delete remote branch."
     fi
   fi
 
-  # Checkout base branch and pull
+  # Checkout base branch and pull (stash dirty state so checkout/pull don't fail)
   echo ""
-  git -C "$repo_root" checkout "$base_branch" && git -C "$repo_root" pull
+  local needs_stash=false
+  if ! git -C "$repo_root" diff --quiet 2>/dev/null || ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
+    needs_stash=true
+    git -C "$repo_root" stash push -q -m "wt done: auto-stash before checkout"
+  fi
+  git -C "$repo_root" checkout "$base_branch" || {
+    echo "Error: Could not checkout '$base_branch'."
+    [ "$needs_stash" = true ] && git -C "$repo_root" stash pop -q 2>/dev/null
+    return 1
+  }
+  git -C "$repo_root" pull
+  if [ "$needs_stash" = true ]; then
+    git -C "$repo_root" stash pop -q 2>/dev/null || echo "Warning: Could not restore stashed changes. Run 'git -C $repo_root stash pop' manually."
+  fi
   echo ""
 
   # Update main CLAUDE.md map
