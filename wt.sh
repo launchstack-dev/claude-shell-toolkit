@@ -1199,11 +1199,16 @@ _wt_done() {
   echo "Finishing worktree '$name' (branch: $branch, base: $base_branch)"
   echo ""
 
-  # Check if branch was merged into base on the remote
+  # Check if local branch tip is an ancestor of origin/$base_branch (merge commits),
+  # or if a PR for this branch was merged (squash/rebase merges)
   local branch_merged=false
-  git -C "$repo_root" fetch origin --quiet 2>/dev/null
+  git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null
   if git -C "$repo_root" merge-base --is-ancestor "$branch" "origin/$base_branch" 2>/dev/null; then
     branch_merged=true
+  elif command -v gh &>/dev/null; then
+    local merged_count
+    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null)
+    [ "${merged_count:-0}" -gt 0 ] 2>/dev/null && branch_merged=true
   fi
 
   if [ "$branch_merged" = false ]; then
