@@ -1199,20 +1199,18 @@ _wt_done() {
   echo "Finishing worktree '$name' (branch: $branch, base: $base_branch)"
   echo ""
 
-  # Check if branch has been merged into base (try local ref, then origin/)
+  # Check if branch was merged into base on the remote
   local branch_merged=false
-  git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null
-  if git -C "$repo_root" merge-base --is-ancestor "$branch" "$base_branch" 2>/dev/null; then
-    branch_merged=true
-  elif git -C "$repo_root" merge-base --is-ancestor "origin/$branch" "$base_branch" 2>/dev/null; then
+  git -C "$repo_root" fetch origin --quiet 2>/dev/null
+  if git -C "$repo_root" merge-base --is-ancestor "$branch" "origin/$base_branch" 2>/dev/null; then
     branch_merged=true
   fi
 
   if [ "$branch_merged" = false ]; then
-    echo "Warning: Branch '$branch' has NOT been merged into '$base_branch'."
+    echo "Warning: Branch '$branch' has NOT been merged into 'origin/$base_branch'."
     _wt_prompt "Continue without merging? [y/N]"
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-      echo "Run 'wt merge $name' then 'wt done $name'."
+      echo "Merge your PR on the remote, then re-run 'wt done $name'."
       return 1
     fi
   fi
@@ -1240,11 +1238,11 @@ _wt_done() {
   if git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
     local do_delete=false
     if [ "$branch_merged" = true ]; then
-      echo "Branch '$branch' is merged into '$base_branch'."
+      echo "Branch '$branch' is merged into 'origin/$base_branch'."
       _wt_prompt "Delete remote branch 'origin/$branch'? [Y/n]"
       [[ ! "$REPLY" =~ ^[Nn]$ ]] && do_delete=true
     else
-      echo "Branch '$branch' is NOT merged into '$base_branch'."
+      echo "Branch '$branch' is NOT merged into 'origin/$base_branch'."
       _wt_prompt "Delete unmerged remote branch 'origin/$branch'? [y/N]"
       [[ "$REPLY" =~ ^[Yy]$ ]] && do_delete=true
     fi
