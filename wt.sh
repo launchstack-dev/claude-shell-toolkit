@@ -1149,6 +1149,22 @@ _wt_rebase() {
   fi
 }
 
+# Returns 0 if branch appears merged into base, 1 otherwise.
+# Checks merge commits via merge-base, then squash/rebase merges via gh pr list.
+# Usage: _wt_check_merged <repo_root> <branch> <base_branch>
+_wt_check_merged() {
+  local repo_root="$1" branch="$2" base_branch="$3"
+  git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null
+  if git -C "$repo_root" merge-base --is-ancestor "$branch" "origin/$base_branch" 2>/dev/null; then
+    return 0
+  elif command -v gh &>/dev/null; then
+    local merged_count
+    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null)
+    [ "${merged_count:-0}" -gt 0 ] 2>/dev/null && return 0
+  fi
+  return 1
+}
+
 _wt_done() {
   local name="$1"
 
@@ -1199,28 +1215,21 @@ _wt_done() {
   echo "Finishing worktree '$name' (branch: $branch, base: $base_branch)"
   echo ""
 
-  # Check if local branch tip is an ancestor of origin/$base_branch (merge commits),
-  # or if a PR for this branch was merged (squash/rebase merges)
+  echo "→ Checking merge status..."
   local branch_merged=false
-  git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null
-  if git -C "$repo_root" merge-base --is-ancestor "$branch" "origin/$base_branch" 2>/dev/null; then
+  if _wt_check_merged "$repo_root" "$branch" "$base_branch"; then
     branch_merged=true
-  elif command -v gh &>/dev/null; then
-    local merged_count
-    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null)
-    [ "${merged_count:-0}" -gt 0 ] 2>/dev/null && branch_merged=true
-  fi
-
-  if [ "$branch_merged" = false ]; then
-    echo "Warning: Branch '$branch' has NOT been merged into 'origin/$base_branch'."
-    _wt_prompt "Continue without merging? [y/N]"
+    echo "  Branch '$branch' is merged into 'origin/$base_branch'."
+  else
+    echo "  Warning: Branch '$branch' has NOT been merged into 'origin/$base_branch'."
+    _wt_prompt "  Continue without merging? [y/N]"
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
       echo "Merge your PR on the remote, then re-run 'wt done $name'."
       return 1
     fi
   fi
 
-  # Kill processes in the worktree
+  echo "→ Stopping processes..."
   _wt_kill_procs "$worktree_path" "$name" "true" || return 1
 
   # Move out if inside the worktree
@@ -1228,36 +1237,35 @@ _wt_done() {
     cd "$repo_root" || return 1
   fi
 
-  # Remove worktree
+  echo "→ Removing worktree..."
   git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || {
     rm -rf "$worktree_path"
     git -C "$repo_root" worktree prune
   }
-  echo "Removed worktree '$name'."
+  echo "  Removed worktree '$name'."
 
-  # Delete local branch
+  echo "→ Deleting local branch..."
   git -C "$repo_root" branch -d "$branch" 2>/dev/null || git -C "$repo_root" branch -D "$branch" 2>/dev/null
-  echo "Deleted local branch '$branch'."
+  echo "  Deleted local branch '$branch'."
 
-  # Delete remote branch (with merge status context)
+  echo "→ Checking remote branch..."
   if git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
     local do_delete=false
     if [ "$branch_merged" = true ]; then
-      echo "Branch '$branch' is merged into 'origin/$base_branch'."
-      _wt_prompt "Delete remote branch 'origin/$branch'? [Y/n]"
+      _wt_prompt "  Delete remote branch 'origin/$branch'? [Y/n]"
       [[ ! "$REPLY" =~ ^[Nn]$ ]] && do_delete=true
     else
-      echo "Branch '$branch' is NOT merged into 'origin/$base_branch'."
-      _wt_prompt "Delete unmerged remote branch 'origin/$branch'? [y/N]"
+      _wt_prompt "  Delete unmerged remote branch 'origin/$branch'? [y/N]"
       [[ "$REPLY" =~ ^[Yy]$ ]] && do_delete=true
     fi
     if [ "$do_delete" = true ]; then
-      git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "Deleted remote branch '$branch'." || echo "Warning: Could not delete remote branch."
+      git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "  Deleted remote branch '$branch'." || echo "  Warning: Could not delete remote branch."
     fi
+  else
+    echo "  No remote branch to delete."
   fi
 
-  # Checkout base branch and pull (stash dirty state so checkout/pull don't fail)
-  echo ""
+  echo "→ Switching to '$base_branch'..."
   local needs_stash=false
   if ! git -C "$repo_root" diff --quiet 2>/dev/null || ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
     needs_stash=true
