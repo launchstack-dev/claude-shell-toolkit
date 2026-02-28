@@ -7,16 +7,17 @@
 #   3. Unmerged branch: merge-base fails and gh finds no merged PR → not merged (1)
 #   4. gh not installed: merge-base fails, no gh → not merged (1), no crash
 #   5. gh auth failure: merge-base fails, gh exits non-zero → not merged (1), no crash
-#   6. Fetch is targeted to base_branch only, not all refs
+#   6. Fetch passes base_branch and --quiet to origin, not bare 'fetch origin'
 
 SCRIPT_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 
 setup() {
   MOCK_DIR="$(mktemp -d)"
   MOCK_FETCH_ARGS_FILE="$BATS_TEST_TMPDIR/git_fetch_args"
+  MOCK_GH_ARGS_FILE="$BATS_TEST_TMPDIR/gh_args"
   ORIG_PATH="$PATH"
 
-  # Mock git: fetch always succeeds; merge-base exit controlled by MOCK_MERGE_BASE_EXIT
+  # Mock git: fetch exit controlled by MOCK_FETCH_EXIT (default 0); merge-base exit by MOCK_MERGE_BASE_EXIT
   cat > "$MOCK_DIR/git" << 'EOF'
 #!/bin/bash
 while [[ "$1" == "-C" ]]; do shift 2; done
@@ -24,7 +25,7 @@ case "$1" in
   fetch)
     shift  # skip "fetch"
     echo "$@" > "$MOCK_FETCH_ARGS_FILE"
-    exit 0
+    exit "${MOCK_FETCH_EXIT:-0}"
     ;;
   merge-base)
     exit "${MOCK_MERGE_BASE_EXIT:-1}"
@@ -36,9 +37,10 @@ esac
 EOF
   chmod +x "$MOCK_DIR/git"
 
-  # Mock gh: output controlled by MOCK_GH_PR_COUNT; exit by MOCK_GH_EXIT
+  # Mock gh: output controlled by MOCK_GH_PR_COUNT; exit by MOCK_GH_EXIT; args captured to file
   cat > "$MOCK_DIR/gh" << 'EOF'
 #!/bin/bash
+echo "$@" > "$MOCK_GH_ARGS_FILE"
 if [ "${MOCK_GH_EXIT:-0}" -ne 0 ]; then
   echo "error: authentication required" >&2
   exit "${MOCK_GH_EXIT}"
@@ -47,10 +49,10 @@ echo "${MOCK_GH_PR_COUNT:-0}"
 EOF
   chmod +x "$MOCK_DIR/gh"
 
-  export MOCK_DIR MOCK_FETCH_ARGS_FILE ORIG_PATH
+  export MOCK_DIR MOCK_FETCH_ARGS_FILE MOCK_GH_ARGS_FILE ORIG_PATH
   export PATH="$MOCK_DIR:$PATH"
 
-  # Load wt.sh functions (jq warning to /dev/null)
+  # Load wt.sh functions; suppress stderr (sourcing may emit jq or config warnings)
   source "$SCRIPT_DIR/wt.sh" 2>/dev/null
 }
 
@@ -76,7 +78,7 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
-@test "squash merge: gh finds 2 merged PRs (multiple branches) → returns merged" {
+@test "squash merge: gh returns count > 1 for same branch → returns merged" {
   export MOCK_MERGE_BASE_EXIT=1
   export MOCK_GH_PR_COUNT=2
   run _wt_check_merged "/fake/repo" "feature-branch" "main"
@@ -97,8 +99,8 @@ teardown() {
 @test "gh not installed: merge-base fails, no gh on PATH → returns not merged without crash" {
   rm -f "$MOCK_DIR/gh"
   export MOCK_MERGE_BASE_EXIT=1
-  # Strip homebrew bin so system gh is also absent
-  export PATH="$MOCK_DIR:/bin:/usr/bin:/usr/local/bin:/usr/sbin:/sbin"
+  # Only mock dir on PATH — function only needs mocked git and shell builtins
+  export PATH="$MOCK_DIR"
   run _wt_check_merged "/fake/repo" "feature-branch" "main"
   [ "$status" -eq 1 ]
 }
@@ -117,11 +119,32 @@ teardown() {
   [ "$status" -eq 1 ]
 }
 
+# ── gh argument validation ───────────────────────────────────────────────────
+
+@test "gh check uses --head <branch> and --state merged" {
+  export MOCK_MERGE_BASE_EXIT=1
+  export MOCK_GH_PR_COUNT=1
+  _wt_check_merged "/fake/repo" "feature-branch" "main" || true
+  [ -f "$MOCK_GH_ARGS_FILE" ]
+  gh_args="$(cat "$MOCK_GH_ARGS_FILE")"
+  [[ "$gh_args" == *"--head feature-branch"* ]]
+  [[ "$gh_args" == *"--state merged"* ]]
+}
+
+# ── Fetch failure graceful degradation ───────────────────────────────────────
+
+@test "fetch fails: function continues using cached ref, returns not merged" {
+  export MOCK_FETCH_EXIT=1
+  export MOCK_MERGE_BASE_EXIT=1
+  run _wt_check_merged "/fake/repo" "feature-branch" "main"
+  [ "$status" -eq 1 ]
+}
+
 # ── Targeted fetch ──────────────────────────────────────────────────────────
 
 @test "fetch uses base_branch argument, not bare 'fetch origin'" {
   export MOCK_MERGE_BASE_EXIT=0
-  _wt_check_merged "/fake/repo" "feature-branch" "main"
+  _wt_check_merged "/fake/repo" "feature-branch" "main" || true
   [ -f "$MOCK_FETCH_ARGS_FILE" ]
   fetch_args="$(cat "$MOCK_FETCH_ARGS_FILE")"
   [ "$fetch_args" = "origin main --quiet" ]
