@@ -232,16 +232,16 @@ _wt_kill_procs() {
     _dev_stop "$name" 2>/dev/null || true
   fi
 
-  # Find processes whose CWD is under the worktree path (catches nested dirs)
-  # Falls back to lsof +d if the CWD approach finds nothing
+  [ "$force" = "true" ] && echo "  Identifying processes..."
+
+  # Find processes whose CWD is under the worktree path — single lsof call for all PIDs
   local pids="" pid cwd comm
-  while IFS= read -r pid; do
-    [ -z "$pid" ] && continue
-    cwd="$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)" || continue
-    if [[ "$cwd/" == "$worktree_path/"* ]]; then
-      pids="$pids $pid"
-    fi
-  done < <(ps -eo pid= -o comm= 2>/dev/null | awk '{print $1}')
+  local cwd_pids
+  cwd_pids="$(lsof -d cwd -Fn 2>/dev/null | awk -v path="$worktree_path/" '
+    /^p/ { pid = substr($0, 2) }
+    /^n/ { if (index(substr($0, 2) "/", path) == 1) print pid }
+  ')" || true
+  pids="$cwd_pids"
 
   # Also catch processes with open files directly in the worktree root
   local lsof_pids
@@ -256,7 +256,14 @@ _wt_kill_procs() {
   pids="${pids%% }"
 
   if [ -z "$pids" ]; then
+    [ "$force" = "true" ] && echo "  No processes found."
     return 0
+  fi
+
+  if [ "$force" = "true" ]; then
+    local pid_count
+    pid_count=$(echo "$pids" | wc -w | tr -d ' ')
+    echo "  Found $pid_count process(es)."
   fi
 
   # Separate Claude Code / agent processes from everything else
@@ -277,7 +284,11 @@ _wt_kill_procs() {
   for pid in $other_pids; do
     comm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
     if [ "$force" = "true" ]; then
-      kill "$pid" 2>/dev/null && echo "  Killed $comm (PID $pid)" || true
+      if kill "$pid" 2>/dev/null; then
+        echo "  Killed $comm (PID $pid)"
+      else
+        echo "  $comm (PID $pid) already exited"
+      fi
     else
       _wt_prompt "  Kill $comm (PID $pid)? [y/N]"
       if [[ "$REPLY" =~ ^[Yy]$ ]]; then
@@ -292,7 +303,11 @@ _wt_kill_procs() {
   if [ "$has_cc" = true ]; then
     if [ "$force" = "true" ]; then
       for pid in $cc_pids; do
-        kill "$pid" 2>/dev/null && echo "  Killed Claude Code (PID $pid)" || true
+        if kill "$pid" 2>/dev/null; then
+          echo "  Killed Claude Code (PID $pid)"
+        else
+          echo "  Claude Code (PID $pid) already exited"
+        fi
       done
     else
       echo ""
