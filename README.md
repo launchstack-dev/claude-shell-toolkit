@@ -19,7 +19,7 @@ Shell scripts for running parallel [Claude Code](https://docs.anthropic.com/en/d
 git clone https://github.com/launchstack-dev/git-worktree-claude.git ~/.claude/scripts
 
 # Source in your shell (order matters: wt.sh first, dev.sh after)
-cat >> ~/.zshrc << 'EOF'
+echo >> ~/.zshrc && cat >> ~/.zshrc << 'EOF'
 source "$HOME/.claude/scripts/wt.sh"
 source "$HOME/.claude/scripts/dev.sh"
 source "$HOME/.claude/scripts/br.sh"

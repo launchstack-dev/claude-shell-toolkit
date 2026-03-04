@@ -578,6 +578,7 @@ HELP
 
 # ─── Dispatcher ──────────────────────────────────────────────────────────────
 
+unalias dev 2>/dev/null  # prevent zsh alias-expansion parse error if 'dev' is already aliased
 dev() {
   if [ "$1" = "--" ]; then shift; _dev_enter "$@"; return $?; fi
   case "$1" in
