@@ -378,6 +378,16 @@ br-pr              # push + create PR targeting base
 br-pr-done         # clean up after merge
 ```
 
+## Upgrade
+
+```bash
+cd ~/.claude/scripts
+git pull
+source ~/.zshrc
+```
+
+Scripts are sourced at shell startup, so the pull takes effect immediately on the next `source ~/.zshrc` or new shell session.
+
 ## Compatibility
 
 - Shell: bash and zsh
