@@ -232,22 +232,27 @@ _wt_kill_procs() {
     _dev_stop "$name" 2>/dev/null || true
   fi
 
-  # Find processes whose CWD is under the worktree path (catches nested dirs)
-  # Falls back to lsof +d if the CWD approach finds nothing
-  local pids="" pid cwd comm
-  while IFS= read -r pid; do
-    [ -z "$pid" ] && continue
-    cwd="$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)" || continue
-    if [[ "$cwd/" == "$worktree_path/"* ]]; then
-      pids="$pids $pid"
-    fi
-  done < <(ps -eo pid= -o comm= 2>/dev/null | awk '{print $1}')
+  [ "$force" = "true" ] && echo "  Identifying processes..."
 
-  # Also catch processes with open files directly in the worktree root
-  local lsof_pids
-  lsof_pids="$(timeout 5 lsof +d "$worktree_path" -t 2>/dev/null | sort -u)" || true
-  if [ -n "$lsof_pids" ]; then
-    pids="$pids $lsof_pids"
+  # Find processes whose CWD is under the worktree path — single lsof call for all PIDs
+  local pids="" pid cwd comm
+  local cwd_pids=""
+  if ! command -v lsof &>/dev/null; then
+    [ "$force" = "true" ] && echo "  Warning: lsof not available; skipping process scan." >&2
+  else
+    # Appends "/" to candidate path before prefix-check to prevent partial-name false positives
+    cwd_pids="$(lsof -d cwd -Fn 2>/dev/null | awk -v path="$worktree_path/" '
+      /^p/ { pid = substr($0, 2) }
+      /^n/ { if (index(substr($0, 2) "/", path) == 1) print pid }
+    ')" || true
+    pids="$cwd_pids"
+
+    # Also catch processes with open files directly in the worktree root
+    local lsof_pids
+    lsof_pids="$(timeout 5 lsof +d "$worktree_path" -t 2>/dev/null | sort -u)" || true
+    if [ -n "$lsof_pids" ]; then
+      pids="$pids $lsof_pids"
+    fi
   fi
 
   # Deduplicate
@@ -256,7 +261,14 @@ _wt_kill_procs() {
   pids="${pids%% }"
 
   if [ -z "$pids" ]; then
+    [ "$force" = "true" ] && echo "  No processes found."
     return 0
+  fi
+
+  if [ "$force" = "true" ]; then
+    local pid_count
+    pid_count=$(echo "$pids" | wc -w | tr -d ' ')
+    echo "  Found $pid_count process(es)."
   fi
 
   # Separate Claude Code / agent processes from everything else
@@ -273,11 +285,15 @@ _wt_kill_procs() {
     fi
   done
 
-  # Auto-kill non-Claude processes
+  # Kill non-Claude processes (auto in force mode, prompted in interactive mode)
   for pid in $other_pids; do
     comm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
     if [ "$force" = "true" ]; then
-      kill "$pid" 2>/dev/null && echo "  Killed $comm (PID $pid)" || true
+      if kill "$pid" 2>/dev/null; then
+        echo "  Killed $comm (PID $pid)"
+      else
+        echo "  $comm (PID $pid) already exited"
+      fi
     else
       _wt_prompt "  Kill $comm (PID $pid)? [y/N]"
       if [[ "$REPLY" =~ ^[Yy]$ ]]; then
@@ -292,7 +308,11 @@ _wt_kill_procs() {
   if [ "$has_cc" = true ]; then
     if [ "$force" = "true" ]; then
       for pid in $cc_pids; do
-        kill "$pid" 2>/dev/null && echo "  Killed Claude Code (PID $pid)" || true
+        if kill "$pid" 2>/dev/null; then
+          echo "  Killed Claude Code (PID $pid)"
+        else
+          echo "  Claude Code (PID $pid) already exited"
+        fi
       done
     else
       echo ""
@@ -304,7 +324,11 @@ _wt_kill_procs() {
       _wt_prompt "Kill Claude Code sessions? They may have in-flight work. [y/N]"
       if [[ "$REPLY" =~ ^[Yy]$ ]]; then
         for pid in $cc_pids; do
-          kill "$pid" 2>/dev/null && echo "  Killed PID $pid" || true
+          if kill "$pid" 2>/dev/null; then
+            echo "  Killed PID $pid"
+          else
+            echo "  PID $pid already exited or could not be killed"
+          fi
         done
       else
         echo "  Skipped. Close them manually, then re-run."
@@ -1149,6 +1173,29 @@ _wt_rebase() {
   fi
 }
 
+# Returns 0 if branch appears merged into base, 1 otherwise.
+# Checks ancestry via merge-base (covers fast-forward and merge-commit merges),
+# then squash/rebase merges via gh pr list.
+# Note: fetches origin/<base_branch> as a side effect; silently degrades when fetch
+# fails (uses cached ref) or when gh is unavailable.
+# Usage: _wt_check_merged <repo_root> <branch> <base_branch>
+_wt_check_merged() {
+  local repo_root="$1" branch="$2" base_branch="$3"
+  if ! git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null; then
+    echo "  Warning: Could not fetch 'origin/$base_branch' — merge check uses cached ref." >&2
+  fi
+  if git -C "$repo_root" merge-base --is-ancestor "$branch" "origin/$base_branch" 2>/dev/null; then
+    return 0
+  elif command -v gh &>/dev/null; then
+    local merged_count
+    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null)
+    if [[ "$merged_count" =~ ^[0-9]+$ ]] && [ "$merged_count" -gt 0 ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 _wt_done() {
   local name="$1"
 
@@ -1199,25 +1246,21 @@ _wt_done() {
   echo "Finishing worktree '$name' (branch: $branch, base: $base_branch)"
   echo ""
 
-  # Check if branch has been merged into base (try local ref, then origin/)
+  echo "→ Checking merge status..."
   local branch_merged=false
-  git -C "$repo_root" fetch origin "$base_branch" --quiet 2>/dev/null
-  if git -C "$repo_root" merge-base --is-ancestor "$branch" "$base_branch" 2>/dev/null; then
+  if _wt_check_merged "$repo_root" "$branch" "$base_branch"; then
     branch_merged=true
-  elif git -C "$repo_root" merge-base --is-ancestor "origin/$branch" "$base_branch" 2>/dev/null; then
-    branch_merged=true
-  fi
-
-  if [ "$branch_merged" = false ]; then
-    echo "Warning: Branch '$branch' has NOT been merged into '$base_branch'."
-    _wt_prompt "Continue without merging? [y/N]"
+    echo "  Branch '$branch' appears merged into 'origin/$base_branch'."
+  else
+    echo "  Warning: Branch '$branch' has NOT been merged into 'origin/$base_branch'."
+    _wt_prompt "  Continue without merging? [y/N]"
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-      echo "Run 'wt merge $name' then 'wt done $name'."
+      echo "Merge your PR on the remote, then re-run 'wt done $name'."
       return 1
     fi
   fi
 
-  # Kill processes in the worktree
+  echo "→ Stopping processes..."
   _wt_kill_procs "$worktree_path" "$name" "true" || return 1
 
   # Move out if inside the worktree
@@ -1225,40 +1268,48 @@ _wt_done() {
     cd "$repo_root" || return 1
   fi
 
-  # Remove worktree
-  git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || {
-    rm -rf "$worktree_path"
-    git -C "$repo_root" worktree prune
-  }
-  echo "Removed worktree '$name'."
+  echo "→ Removing worktree..."
+  if ! git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null; then
+    rm -rf "$worktree_path" || {
+      echo "  Error: Could not remove worktree at $worktree_path" >&2
+      return 1
+    }
+    git -C "$repo_root" worktree prune || echo "  Warning: git worktree prune failed." >&2
+  fi
+  echo "  Removed worktree '$name'."
 
-  # Delete local branch
-  git -C "$repo_root" branch -d "$branch" 2>/dev/null || git -C "$repo_root" branch -D "$branch" 2>/dev/null
-  echo "Deleted local branch '$branch'."
+  echo "→ Deleting local branch..."
+  if git -C "$repo_root" branch -d "$branch" 2>/dev/null; then
+    echo "  Deleted local branch '$branch'."
+  elif git -C "$repo_root" branch -D "$branch" 2>/dev/null; then
+    echo "  Deleted local branch '$branch' (force-deleted; branch was not fully merged)."
+  else
+    echo "  Warning: Could not delete local branch '$branch'." >&2
+  fi
 
-  # Delete remote branch (with merge status context)
+  echo "→ Checking remote branch..."
   if git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
     local do_delete=false
     if [ "$branch_merged" = true ]; then
-      echo "Branch '$branch' is merged into '$base_branch'."
-      _wt_prompt "Delete remote branch 'origin/$branch'? [Y/n]"
+      _wt_prompt "  Delete remote branch 'origin/$branch'? [Y/n]"
       [[ ! "$REPLY" =~ ^[Nn]$ ]] && do_delete=true
     else
-      echo "Branch '$branch' is NOT merged into '$base_branch'."
-      _wt_prompt "Delete unmerged remote branch 'origin/$branch'? [y/N]"
+      _wt_prompt "  Delete unmerged remote branch 'origin/$branch'? [y/N]"
       [[ "$REPLY" =~ ^[Yy]$ ]] && do_delete=true
     fi
     if [ "$do_delete" = true ]; then
-      git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "Deleted remote branch '$branch'." || echo "Warning: Could not delete remote branch."
+      git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "  Deleted remote branch '$branch'." || echo "  Warning: Could not delete remote branch."
     fi
+  else
+    echo "  No remote branch to delete."
   fi
 
-  # Checkout base branch and pull (stash dirty state so checkout/pull don't fail)
-  echo ""
+  echo "→ Switching to '$base_branch'..."
   local needs_stash=false
   if ! git -C "$repo_root" diff --quiet 2>/dev/null || ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
-    needs_stash=true
-    git -C "$repo_root" stash push -q -m "wt done: auto-stash before checkout"
+    if git -C "$repo_root" stash push -q -m "wt done: auto-stash before checkout" 2>/dev/null; then
+      needs_stash=true
+    fi
   fi
   git -C "$repo_root" checkout "$base_branch" || {
     echo "Error: Could not checkout '$base_branch'."

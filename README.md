@@ -19,7 +19,7 @@ Shell scripts for running parallel [Claude Code](https://docs.anthropic.com/en/d
 git clone https://github.com/launchstack-dev/git-worktree-claude.git ~/.claude/scripts
 
 # Source in your shell (order matters: wt.sh first, dev.sh after)
-cat >> ~/.zshrc << 'EOF'
+echo >> ~/.zshrc && cat >> ~/.zshrc << 'EOF'
 source "$HOME/.claude/scripts/wt.sh"
 source "$HOME/.claude/scripts/dev.sh"
 source "$HOME/.claude/scripts/br.sh"
@@ -377,6 +377,16 @@ br quick-fix
 br-pr              # push + create PR targeting base
 br-pr-done         # clean up after merge
 ```
+
+## Upgrade
+
+```bash
+cd ~/.claude/scripts
+git pull
+source ~/.zshrc
+```
+
+Scripts are sourced at shell startup, so the pull takes effect immediately on the next `source ~/.zshrc` or new shell session.
 
 ## Compatibility
 
