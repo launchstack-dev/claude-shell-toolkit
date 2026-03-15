@@ -33,6 +33,7 @@ ccf() {
 cc-yolo() {
   claude --dangerously-skip-permissions "$@"
 }
+ccyolo() { cc-yolo "$@"; }
 
 cc-edit() {
   claude --permission-mode acceptEdits "$@"
