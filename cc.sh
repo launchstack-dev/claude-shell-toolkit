@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cc.sh — Claude Code Shell Shortcuts
-# Source from ~/.zshrc. Provides: cc, ccc, ccr, ccf, cc-yolo, cc-edit,
+# Source from ~/.zshrc. Provides: cc, ccc, ccr, ccf, cc-yolo, ccyolo, cc-edit,
 # cc-plan, cc-read, cc-opus, cc-sonnet, cc-haiku, cc-q, cc-pipe,
 # cc-review, cc-review-branch, cc-explain, cc-msg, cc-deep, cc-fast,
 # cc-debug, cc-budget, cc-vm, cc-nobash, cc-nonet, cc-jail,
