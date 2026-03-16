@@ -1,13 +1,11 @@
 #!/usr/bin/env bats
 # Tests for _wt_check_merged in wt.sh
 #
-# Scenarios:
-#   1. Regular merge: merge-base sees branch as ancestor → merged (0)
-#   2. Squash/rebase merge: merge-base fails but gh finds merged PR → merged (0)
-#   3. Unmerged branch: merge-base fails and gh finds no merged PR → not merged (1)
-#   4. gh not installed: merge-base fails, no gh → not merged (1), no crash
-#   5. gh auth failure: merge-base fails, gh exits non-zero → not merged (1), no crash
-#   6. Fetch passes base_branch and --quiet to origin, not bare 'fetch origin'
+# Coverage:
+#   - Merge detection: regular merge-commit/fast-forward, squash/rebase via gh pr list
+#   - gh fallback: not installed, auth failure, empty/non-numeric output, count > 1
+#   - gh argument validation: --head/--state flags, branch names with slashes
+#   - Fetch behavior: targeted fetch (base_branch + --quiet), graceful degradation on failure
 
 SCRIPT_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 
@@ -124,7 +122,8 @@ teardown() {
 @test "gh check uses --head <branch> and --state merged" {
   export MOCK_MERGE_BASE_EXIT=1
   export MOCK_GH_PR_COUNT=1
-  _wt_check_merged "/fake/repo" "feature-branch" "main" || true
+  run _wt_check_merged "/fake/repo" "feature-branch" "main"
+  [ "$status" -eq 0 ]
   [ -f "$MOCK_GH_ARGS_FILE" ]
   gh_args="$(cat "$MOCK_GH_ARGS_FILE")"
   [[ "$gh_args" == *"--head feature-branch"* ]]
@@ -144,8 +143,30 @@ teardown() {
 
 @test "fetch uses base_branch argument, not bare 'fetch origin'" {
   export MOCK_MERGE_BASE_EXIT=0
-  _wt_check_merged "/fake/repo" "feature-branch" "main" || true
+  run _wt_check_merged "/fake/repo" "feature-branch" "main"
+  [ "$status" -eq 0 ]
   [ -f "$MOCK_FETCH_ARGS_FILE" ]
   fetch_args="$(cat "$MOCK_FETCH_ARGS_FILE")"
   [ "$fetch_args" = "origin main --quiet" ]
+}
+
+# ── New: branch name with slash ──────────────────────────────────────────────
+
+@test "gh check: branch name with slash passed verbatim to --head" {
+  export MOCK_MERGE_BASE_EXIT=1
+  export MOCK_GH_PR_COUNT=1
+  run _wt_check_merged "/fake/repo" "feature/my-thing" "main"
+  [ "$status" -eq 0 ]
+  [ -f "$MOCK_GH_ARGS_FILE" ]
+  gh_args="$(cat "$MOCK_GH_ARGS_FILE")"
+  [[ "$gh_args" == *"--head feature/my-thing"* ]]
+}
+
+# ── New: non-numeric gh output ───────────────────────────────────────────────
+
+@test "gh returns non-numeric output (e.g. 'null'): treated as not merged" {
+  export MOCK_MERGE_BASE_EXIT=1
+  export MOCK_GH_PR_COUNT="null"
+  run _wt_check_merged "/fake/repo" "feature-branch" "main"
+  [ "$status" -eq 1 ]
 }

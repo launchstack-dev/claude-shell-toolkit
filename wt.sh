@@ -240,8 +240,10 @@ _wt_kill_procs() {
   if ! command -v lsof &>/dev/null; then
     [ "$force" = "true" ] && echo "  Warning: lsof not available; skipping process scan." >&2
   else
-    # Appends "/" to candidate path before prefix-check to prevent partial-name false positives
-    cwd_pids="$(lsof -d cwd -Fn 2>/dev/null | awk -v path="$worktree_path/" '
+    # Appends "/" to the lsof CWD string before prefix-check to prevent partial-name
+    # false positives (e.g. /worktrees/foo matching /worktrees/foobar).
+    # The path variable already carries a trailing "/" from the shell expansion above.
+    cwd_pids="$(timeout 5 lsof -d cwd -Fn 2>/dev/null | awk -v path="$worktree_path/" '
       /^p/ { pid = substr($0, 2) }
       /^n/ { if (index(substr($0, 2) "/", path) == 1) print pid }
     ')" || true
@@ -276,7 +278,7 @@ _wt_kill_procs() {
   local has_cc=false
   for pid in $pids; do
     comm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
-    # Claude Code runs as node with "claude" in args, or as the claude binary
+    # Detected by: comm name containing "claude", or "claude" appearing anywhere in the full args string
     if [[ "$comm" == *claude* ]] || ps -p "$pid" -o args= 2>/dev/null | grep -q "claude"; then
       cc_pids="$cc_pids $pid"
       has_cc=true
@@ -297,7 +299,11 @@ _wt_kill_procs() {
     else
       _wt_prompt "  Kill $comm (PID $pid)? [y/N]"
       if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-        kill "$pid" 2>/dev/null && echo "  Killed." || echo "  Already exited."
+        if kill "$pid" 2>/dev/null; then
+          echo "  Killed."
+        else
+          echo "  Already exited."
+        fi
       else
         echo "  Skipped."
       fi
@@ -1176,8 +1182,8 @@ _wt_rebase() {
 # Returns 0 if branch appears merged into base, 1 otherwise.
 # Checks ancestry via merge-base (covers fast-forward and merge-commit merges),
 # then squash/rebase merges via gh pr list.
-# Note: fetches origin/<base_branch> as a side effect; silently degrades when fetch
-# fails (uses cached ref) or when gh is unavailable.
+# Note: fetches origin/<base_branch> as a side effect; warns to stderr when fetch
+# fails (uses cached ref) and silently skips the gh check when gh is unavailable.
 # Usage: _wt_check_merged <repo_root> <branch> <base_branch>
 _wt_check_merged() {
   local repo_root="$1" branch="$2" base_branch="$3"
@@ -1187,9 +1193,11 @@ _wt_check_merged() {
   if git -C "$repo_root" merge-base --is-ancestor "$branch" "origin/$base_branch" 2>/dev/null; then
     return 0
   elif command -v gh &>/dev/null; then
-    local merged_count
-    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null)
-    if [[ "$merged_count" =~ ^[0-9]+$ ]] && [ "$merged_count" -gt 0 ]; then
+    local merged_count gh_exit=0
+    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null) || gh_exit=$?
+    if [ "$gh_exit" -ne 0 ]; then
+      echo "  Warning: 'gh pr list' failed — cannot verify squash/rebase merge via GitHub API." >&2
+    elif [[ "$merged_count" =~ ^[0-9]+$ ]] && [ "$merged_count" -gt 0 ]; then
       return 0
     fi
   fi
@@ -1263,32 +1271,44 @@ _wt_done() {
   echo "→ Stopping processes..."
   _wt_kill_procs "$worktree_path" "$name" "true" || return 1
 
-  # Move out if inside the worktree
+  # Must cd out before removing the worktree directory; git worktree remove --force
+  # can delete the path while the shell is inside it, leaving the session in a broken state.
   if [[ "$(pwd)/" == "$worktree_path/"* ]]; then
     cd "$repo_root" || return 1
   fi
 
   echo "→ Removing worktree..."
+  local worktree_removed=true
   if ! git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null; then
     rm -rf "$worktree_path" || {
       echo "  Error: Could not remove worktree at $worktree_path" >&2
       return 1
     }
-    git -C "$repo_root" worktree prune || echo "  Warning: git worktree prune failed." >&2
+    if ! git -C "$repo_root" worktree prune 2>/dev/null; then
+      echo "  Warning: git worktree prune failed. Run 'git worktree prune' manually." >&2
+      worktree_removed=false
+    fi
   fi
-  echo "  Removed worktree '$name'."
+  if [ "$worktree_removed" = true ]; then
+    echo "  Removed worktree '$name'."
+  else
+    echo "  Removed worktree directory '$name'. Git tracking entry may be stale."
+  fi
 
   echo "→ Deleting local branch..."
   if git -C "$repo_root" branch -d "$branch" 2>/dev/null; then
     echo "  Deleted local branch '$branch'."
-  elif git -C "$repo_root" branch -D "$branch" 2>/dev/null; then
+  elif git -C "$repo_root" branch -D "$branch"; then
     echo "  Deleted local branch '$branch' (force-deleted; branch was not fully merged)."
   else
     echo "  Warning: Could not delete local branch '$branch'." >&2
   fi
 
   echo "→ Checking remote branch..."
-  if git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
+  local ls_exit
+  git -C "$repo_root" ls-remote --exit-code --heads origin "$branch" &>/dev/null
+  ls_exit=$?
+  if [ "$ls_exit" -eq 0 ]; then
     local do_delete=false
     if [ "$branch_merged" = true ]; then
       _wt_prompt "  Delete remote branch 'origin/$branch'? [Y/n]"
@@ -1300,23 +1320,31 @@ _wt_done() {
     if [ "$do_delete" = true ]; then
       git -C "$repo_root" push origin --delete "$branch" 2>/dev/null && echo "  Deleted remote branch '$branch'." || echo "  Warning: Could not delete remote branch."
     fi
-  else
+  elif [ "$ls_exit" -eq 2 ]; then
     echo "  No remote branch to delete."
+  else
+    echo "  Warning: Could not check remote branch 'origin/$branch' (ls-remote failed)." >&2
+    echo "  If it exists, delete manually: git push origin --delete $branch" >&2
   fi
 
   echo "→ Switching to '$base_branch'..."
   local needs_stash=false
   if ! git -C "$repo_root" diff --quiet 2>/dev/null || ! git -C "$repo_root" diff --cached --quiet 2>/dev/null; then
-    if git -C "$repo_root" stash push -q -m "wt done: auto-stash before checkout" 2>/dev/null; then
-      needs_stash=true
+    if ! git -C "$repo_root" stash push -q -m "wt done: auto-stash before checkout"; then
+      echo "  Error: Could not stash uncommitted changes in '$repo_root'. Aborting." >&2
+      echo "  Resolve manually: git -C $repo_root stash" >&2
+      return 1
     fi
+    needs_stash=true
   fi
   git -C "$repo_root" checkout "$base_branch" || {
     echo "Error: Could not checkout '$base_branch'."
     [ "$needs_stash" = true ] && git -C "$repo_root" stash pop -q 2>/dev/null
     return 1
   }
-  git -C "$repo_root" pull
+  if ! git -C "$repo_root" pull; then
+    echo "  Warning: 'git pull' failed on '$base_branch'. Run 'git -C $repo_root pull' manually." >&2
+  fi
   if [ "$needs_stash" = true ]; then
     git -C "$repo_root" stash pop -q 2>/dev/null || echo "Warning: Could not restore stashed changes. Run 'git -C $repo_root stash pop' manually."
   fi

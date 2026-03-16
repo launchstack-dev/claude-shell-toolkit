@@ -201,7 +201,7 @@ All commands auto-detect the current branch when no name is given.
 
 | Command | Purpose |
 |---------|---------|
-| `cc-yolo` | Skip all permission checks |
+| `cc-yolo` / `ccyolo` | Skip all permission checks |
 | `cc-edit` | Auto-accept edits, prompt for bash |
 | `cc-plan` | Plan mode — approve before implementation |
 | `cc-read` | Read-only exploration |
