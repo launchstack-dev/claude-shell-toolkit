@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cc.sh — Claude Code Shell Shortcuts
 # Source from ~/.zshrc. Provides: cc, ccc, ccr, ccf, cc-yolo, ccyolo, cc-edit,
-# cc-plan, cc-read, cc-opus, cc-sonnet, cc-haiku, cc-q, cc-pipe,
+# cc-new, cc-plan, cc-read, cc-opus, cc-sonnet, cc-haiku, cc-q, cc-pipe,
 # cc-review, cc-review-branch, cc-explain, cc-msg, cc-deep, cc-fast,
 # cc-debug, cc-budget, cc-vm, cc-nobash, cc-nonet, cc-jail,
 # cc-mono, cc-wt, cc-pr, cc-help
@@ -34,6 +34,27 @@ cc-yolo() {
   claude --dangerously-skip-permissions "$@"
 }
 ccyolo() { cc-yolo "$@"; }
+
+cc-new() {
+  local name="$1"
+  if [ -z "$name" ]; then
+    echo "Usage: cc-new <project-name> [claude args...]" >&2
+    return 1
+  fi
+  shift
+  local dir="$HOME/Projects/$name"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "Error: Could not create directory '$dir'" >&2
+    return 1
+  fi
+  cd "$dir" || return 1
+  if ! git init -q 2>/dev/null; then
+    echo "Error: git init failed in '$dir'" >&2
+    return 1
+  fi
+  echo "New project: $dir"
+  cc-yolo "$@"
+}
 
 cc-edit() {
   claude --permission-mode acceptEdits "$@"
@@ -242,6 +263,9 @@ Core Session:
   ccc [args]                Continue last conversation in this directory
   ccr [search]              Resume a conversation (interactive picker)
   ccf [args]                Fork from last conversation (new session ID)
+
+Project:
+  cc-new <name> [args]      Create ~/Projects/<name>, git init, launch cc-yolo
 
 Permission Modes:
   cc-yolo [args]            Skip all permission checks (use in trusted dirs)

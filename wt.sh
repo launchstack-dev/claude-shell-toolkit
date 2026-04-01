@@ -227,9 +227,25 @@ _wt_kill_procs() {
   local name="$2"
   local force="$3"  # "true" = skip prompts, auto-kill
 
-  # Try _dev_stop first (port-based, clean shutdown) — only in interactive mode
-  if [ "$force" != "true" ] && type _dev_stop &>/dev/null; then
-    _dev_stop "$name" 2>/dev/null || true
+  # PID-file-based kill (fast, reliable — does not depend on CWD detection)
+  local pid_dir="$worktree_path/.pids"
+  if [ -d "$pid_dir" ] && type _dev_kill_pid &>/dev/null && [ -n "$(find "$pid_dir" -maxdepth 1 -name '*.pid' -print -quit 2>/dev/null)" ]; then
+    for pidfile in "$pid_dir"/*.pid; do
+      [ -f "$pidfile" ] || continue
+      local srv_name
+      srv_name="$(basename "$pidfile" .pid)"
+      if [ "$force" = "true" ]; then
+        _dev_kill_pid "$pid_dir" "$srv_name" --force
+      else
+        _dev_kill_pid "$pid_dir" "$srv_name"
+      fi
+    done
+  fi
+
+  # Try _dev_stop for any remaining port-based processes (e.g. manually started).
+  # Suppress errors if no .devrc.json exists — PID-file kill above already handled tracked servers.
+  if type _dev_stop &>/dev/null; then
+    _dev_stop "$name" --force 2>/dev/null || true
   fi
 
   [ "$force" = "true" ] && echo "  Identifying processes..."
@@ -391,12 +407,25 @@ _wt_run_project_setup() {
 # ─── Main Functions ──────────────────────────────────────────────────────────
 
 _wt_create() {
-  local name="$1"
-  local base="${2:-HEAD}"
+  # Parse args: <name> [base] [--cc]
+  local name="" base="HEAD" launch_cc=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cc) launch_cc=true; shift ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$1"
+        else
+          base="$1"
+        fi
+        shift ;;
+    esac
+  done
 
   if [ -z "$name" ]; then
-    echo "Usage: wt <name> [base-branch]"
+    echo "Usage: wt <name> [base-branch] [--cc]"
     echo "  Creates a git worktree in .worktrees/<name>"
+    echo "  --cc: launch cc-yolo after creation"
     echo ""
     echo "Subcommands:"
     echo "  wt list              List worktrees with status"
@@ -557,13 +586,26 @@ _wt_create() {
   # Run project setup
   _wt_run_project_setup "$worktree_path"
 
+  # Create .pids/ directory for dev server PID tracking
+  mkdir -p "$worktree_path/.pids"
+
   echo ""
   echo "Worktree '$name' ready at: $worktree_path"
+  echo "  Run 'dev start' to launch dev servers, or 'dev mprocs' for TUI"
 
   # cd into the new worktree so the user is immediately working there
   cd "$worktree_path" || return 1
   echo "Now in: $(pwd)"
   echo "Branch: $(git branch --show-current)"
+
+  if [ "$launch_cc" = true ]; then
+    if type cc-yolo &>/dev/null; then
+      echo ""
+      cc-yolo
+    else
+      echo "Warning: cc-yolo not found. Source cc.sh first." >&2
+    fi
+  fi
 }
 
 _wt_list() {
@@ -873,8 +915,9 @@ Git Worktree Management for Claude Code
 ========================================
 
 Usage:
-  wt <name> [base]       Create worktree in .worktrees/<name>, cd into it
+  wt <name> [base] [--cc] Create worktree in .worktrees/<name>, cd into it
                           base defaults to current branch (HEAD)
+                          --cc: launch cc-yolo after creation
   wt -- <name> [base]     Force create (bypass subcommand matching)
 
 Subcommands:

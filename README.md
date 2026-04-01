@@ -33,6 +33,7 @@ wt-help && dev-help && br-help && cc-help
 ```
 
 **Requires:** `git`, `jq` (`brew install jq`), `gh` (for `br-pr` commands)
+**Optional:** `mprocs` (`brew install mprocs`) for `dev mprocs` TUI
 
 ---
 
@@ -44,7 +45,7 @@ Creates isolated git worktrees with Claude-aware boundaries so parallel Claude i
 
 | Command | Purpose |
 |---------|---------|
-| `wt <name> [base]` | Create worktree, inject Claude context, cd into it. If it already exists, offers to cd or recreate. Auto-cleans broken leftovers. |
+| `wt <name> [base] [--cc]` | Create worktree, inject Claude context, cd into it. `--cc` launches cc-yolo after creation. If it already exists, offers to cd or recreate. Auto-cleans broken leftovers. |
 | `wt list` | List worktrees with status + stale detection. Broken worktrees (failed creates) labeled as `broken`. |
 | `wt merge [name]` | Merge into base branch with pre-merge diff + lockfile |
 | `wt rebase [name]` | Rebase worktree branch onto latest base branch. Fetches origin, shows commits, prompts before executing. |
@@ -88,10 +89,13 @@ Layers dev server management on top of `wt.sh`. Allocates deterministic ports pe
 | Command | Purpose |
 |---------|---------|
 | `dev [name] [base]` | Create/enter worktree + show workspace setup with ports |
-| `dev-init` | Scaffold `.devrc.json` (auto-detects vite, convex, next.js) |
-| `dev-ps` | Show running dev servers, flag orphans, prompt to kill |
-| `dev-stop [name]` | Kill dev servers for a worktree |
-| `dev-help` | Show all commands |
+| `dev init` | Scaffold `.devrc.json` (auto-detects vite, convex, next.js) |
+| `dev start [service]` | Start dev server(s) in background with PID tracking |
+| `dev stop [name]` | Kill dev servers for a worktree (`--force` skips prompts) |
+| `dev ps` | Show running dev servers, flag orphans, prompt to kill |
+| `dev status` | Dashboard: all worktrees, services, ports, PIDs, uptime |
+| `dev mprocs [name]` | Launch mprocs TUI for dev servers (requires `mprocs`) |
+| `dev help` | Show all commands |
 
 ### `.devrc.json`
 
@@ -128,6 +132,17 @@ Run `dev-init` in a project to auto-detect and generate this file.
 - **Worktrees** get a deterministic offset (1-99) based on a hash of the worktree name
 - Collisions with other worktrees or bound ports are automatically resolved
 - Ports are cached in `.ports.json` per worktree (stable across sessions, separate from `.worktree.json`)
+
+### Server Management
+
+`dev start` launches servers in the background with PID file tracking. Each server gets a `.pids/<service>.pid` file containing JSON metadata (pid, port, cmd, started timestamp) and a `.pids/<service>.log` for stdout/stderr.
+
+- **`dev start [service]`** — Start all or a specific service. Skips already-running servers.
+- **`dev stop [name] [--force]`** — Kills via PID files first, falls back to port-based detection.
+- **`dev status`** — Dashboard showing all worktrees, services, ports, PIDs, and uptime.
+- **`dev mprocs`** — Launches a [mprocs](https://github.com/pVolpe/mprocs) TUI with all services. Install via `brew install mprocs`.
+
+When `wt done` or `wt cleanup` runs, servers are automatically killed via PID files before the worktree directory is removed. This eliminates zombie servers.
 
 ### Workspace Output
 
@@ -196,6 +211,12 @@ All commands auto-detect the current branch when no name is given.
 | `ccc [args]` | Continue last conversation |
 | `ccr [search]` | Resume a conversation |
 | `ccf [args]` | Fork from last conversation |
+
+**Project:**
+
+| Command | Purpose |
+|---------|---------|
+| `cc-new <name> [args]` | Create `~/Projects/<name>`, git init, launch cc-yolo |
 
 **Permission Modes:**
 
@@ -347,17 +368,21 @@ dev auth-feature
 # → Tab renamed to "wt: auth-feature"
 # → First split command copied to clipboard
 
-# In Ghostty splits, start dev servers with the printed commands
-# In the main split, launch Claude
-claude
+# Start dev servers in the background (PID-tracked)
+dev start
+# Or use the mprocs TUI for interactive server management
+dev mprocs
 
 # --- Meanwhile, in another Ghostty tab ---
 
 # Start another feature (gets different ports automatically)
 dev billing-ui
 
-# Check what's running across all worktrees
-dev-ps
+# See what's running across all worktrees
+dev status
+
+# Check for orphaned processes
+dev ps
 
 # Keep your branch up to date with main
 wt rebase auth-feature
